@@ -1,4 +1,4 @@
-//! zgen's Z80 core, in the same shape as z68k: data in `cpu`/`decode`, logic
+//! zigesis's Z80 core, in the same shape as z68k: data in `cpu`/`decode`, logic
 //! in `flags`/`core`. Nothing here allocates. See DESIGN.md §3.2.
 //!
 //!     var bus = MyBus{ ... };

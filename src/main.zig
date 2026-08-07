@@ -1,4 +1,4 @@
-//! zgen — Sega Genesis / Mega Drive emulator entry point.
+//! zigesis — Sega Genesis / Mega Drive emulator entry point.
 //!
 //!     zig build run -Doptimize=ReleaseFast              # roms/Sonic-the-Hedgehog.bin
 //!     zig build run -- roms/other.bin
@@ -91,7 +91,7 @@ pub fn main(init: std.process.Init) !void {
             .format = rl.PIXELFORMAT_UNCOMPRESSED_R8G8B8A8,
         }, shot_path.ptr);
     } else {
-        rl.InitWindow(vdp.width * scale, vdp.height * scale, "zgen — Genesis");
+        rl.InitWindow(vdp.width * scale, vdp.height * scale, "zigesis — Genesis");
         if (!rl.IsWindowReady()) {
             // Closing a window that never opened is a segfault, so leave first.
             std.debug.print("no window (no display?); try --shot N out.png instead\n", .{});

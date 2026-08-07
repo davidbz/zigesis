@@ -117,7 +117,7 @@ pub fn build(b: *std.Build) void {
         .dependOn(&z80_sst_run.step);
 
     // --- the emulator ----------------------------------------------------------
-    // raylib is a lazy dependency, but zgen always needs it: the call below
+    // raylib is a lazy dependency, but zigesis always needs it: the call below
     // still runs on every build after a fresh clone, a build script cannot
     // see which step was asked for.
     if (b.lazyDependency("raylib", .{
@@ -126,8 +126,8 @@ pub fn build(b: *std.Build) void {
         .raudio = false, // no sound emulation yet, so nothing to play it with
         .rmodels = false,
     })) |raylib_dep| {
-        const zgen = b.addExecutable(.{
-            .name = "zgen",
+        const zigesis = b.addExecutable(.{
+            .name = "zigesis",
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/main.zig"),
                 .target = target,
@@ -140,11 +140,11 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
-        zgen.root_module.linkLibrary(raylib_dep.artifact("raylib"));
-        b.installArtifact(zgen);
-        check_step.dependOn(&zgen.step);
+        zigesis.root_module.linkLibrary(raylib_dep.artifact("raylib"));
+        b.installArtifact(zigesis);
+        check_step.dependOn(&zigesis.step);
 
-        const run = b.addRunArtifact(zgen);
+        const run = b.addRunArtifact(zigesis);
         run.setCwd(b.path(".")); // roms/ is resolved relative to the project
         run.step.dependOn(b.getInstallStep());
         if (b.args) |args| run.addArgs(args);
