@@ -37,59 +37,6 @@ const audio_chunk_frames = 2048;
 /// sleep, deficit means run flat out.
 const audio_target_frames = 2 * audio_chunk_frames;
 
-/// A 44-byte canonical RIFF/WAVE header for interleaved s16 PCM. The frame
-/// count is only known once a run finishes, so this is written twice: zeroed
-/// up front, then again over the top with the real count.
-fn writeWavHeader(w: *std.Io.Writer, frames: u32) !void {
-    const bytes_per_frame = @sizeOf(audio.Frame);
-    const data_bytes = frames * bytes_per_frame;
-    const fmt_chunk_bytes = 16;
-    const pcm_format = 1;
-
-    try w.writeAll("RIFF");
-    try w.writeInt(u32, wav_header_bytes - 8 + data_bytes, .little);
-    try w.writeAll("WAVEfmt ");
-    try w.writeInt(u32, fmt_chunk_bytes, .little);
-    try w.writeInt(u16, pcm_format, .little);
-    try w.writeInt(u16, audio_channels, .little);
-    try w.writeInt(u32, audio.sample_rate, .little);
-    try w.writeInt(u32, audio.sample_rate * bytes_per_frame, .little);
-    try w.writeInt(u16, bytes_per_frame, .little);
-    try w.writeInt(u16, audio_sample_size, .little);
-    try w.writeAll("data");
-    try w.writeInt(u32, data_bytes, .little);
-}
-
-/// Runs N frames with no window and no sound device, optionally streaming
-/// the mixer to a WAV as it goes — which is the only way to hear the
-/// emulator on a machine that has neither. Returns the frames actually run.
-fn runHeadless(g: *Genesis, c: *Cpu, io: std.Io, n: u32, wav_path: ?[]const u8) !u32 {
-    var frames: u32 = 0;
-    const path = wav_path orelse {
-        while (frames < n and !c.halted) : (frames += 1) scheduler.runFrame(g, c);
-        return frames;
-    };
-
-    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
-    defer file.close(io);
-    var buf: [wav_buffer_bytes]u8 = undefined;
-    var fw = file.writer(io, &buf);
-
-    try writeWavHeader(&fw.interface, 0);
-    var samples: u32 = 0;
-    while (frames < n and !c.halted) : (frames += 1) {
-        scheduler.runFrame(g, c);
-        // Drained every frame so the fixed-size ring never drops a sample.
-        while (g.audio.pop()) |s| : (samples += 1) try fw.interface.writeAll(std.mem.asBytes(&s));
-    }
-
-    try fw.interface.flush();
-    try fw.seekTo(0);
-    try writeWavHeader(&fw.interface, samples);
-    try fw.interface.flush();
-    return frames;
-}
-
 fn pollInput(g: *Genesis) void {
     var b: u8 = 0;
     if (rl.IsKeyDown(rl.KEY_UP)) b |= genesis.btn_up;
