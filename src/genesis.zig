@@ -30,6 +30,11 @@ pub const lines_per_frame = 262;
 
 const ram_bytes = 64 << 10;
 const zram_bytes = 8 << 10;
+const ram_mask = ram_bytes - 1;
+const zram_mask = zram_bytes - 1;
+
+/// The controller's TH pin, bit 6 of both the data and control port bytes.
+const th_bit: u8 = 0x40;
 
 // Controller bits, active high here and inverted on the way out to the ROM.
 pub const btn_up: u8 = 0x01;
@@ -87,14 +92,14 @@ pub const Genesis = struct {
     pub fn read8(g: *Genesis, addr: u24) u8 {
         return switch (addr) {
             0x00_0000...0x3F_FFFF => if (addr < g.rom.len) g.rom[addr] else 0xFF,
-            0xA0_0000...0xA0_3FFF => g.zram[addr & 0x1FFF],
+            0xA0_0000...0xA0_3FFF => g.zram[addr & zram_mask],
             0xA0_4000...0xA0_5FFF => 0, // YM2612: never busy
             0xA1_0000...0xA1_001F => g.ioRead(addr),
             // Bit 0 low means the 68k has the bus; this model grants it the
             // instant it's requested, so it only ever reads busreq back.
             0xA1_1100...0xA1_11FF => if (g.z80_busreq) 0x00 else 0x01,
             0xC0_0000...0xC0_000F => @truncate(g.read16(addr & ~@as(u24, 1)) >> @intCast(8 * (~addr & 1))),
-            0xE0_0000...0xFF_FFFF => g.ram[addr & 0xFFFF],
+            0xE0_0000...0xFF_FFFF => g.ram[addr & ram_mask],
             else => 0xFF,
         };
     }
@@ -102,11 +107,11 @@ pub const Genesis = struct {
     pub fn read16(g: *Genesis, addr: u24) u16 {
         return switch (addr) {
             0x00_0000...0x3F_FFFF => if (addr + 1 < g.rom.len) rd16(g.rom, addr) else 0xFFFF,
-            0xA0_0000...0xA0_3FFF => rd16(&g.zram, addr & 0x1FFF),
+            0xA0_0000...0xA0_3FFF => rd16(&g.zram, addr & zram_mask),
             0xC0_0000...0xC0_0003 => g.v.readData(),
             0xC0_0004...0xC0_0007 => g.v.readStatus(),
             0xC0_0008...0xC0_000F => g.hvCounter(),
-            0xE0_0000...0xFF_FFFF => rd16(&g.ram, addr & 0xFFFF),
+            0xE0_0000...0xFF_FFFF => rd16(&g.ram, addr & ram_mask),
             // Everything else on this bus is a byte-wide device, and answers
             // a word read with the same byte in both halves.
             else => @as(u16, g.read8(addr)) << 8 | g.read8(addr),
@@ -115,27 +120,27 @@ pub const Genesis = struct {
 
     pub fn write8(g: *Genesis, addr: u24, val: u8) void {
         switch (addr) {
-            0xA0_0000...0xA0_3FFF => g.zram[addr & 0x1FFF] = val,
+            0xA0_0000...0xA0_3FFF => g.zram[addr & zram_mask] = val,
             0xA1_0000...0xA1_001F => g.ioWrite(addr, val),
             0xA1_1100...0xA1_11FF => g.z80_busreq = val & 1 != 0,
             0xA1_1200...0xA1_12FF => g.writeZ80Reset(val),
             // A byte write to a VDP port still presents a full word, with the
             // byte in both halves.
             0xC0_0000...0xC0_000F => g.write16(addr & ~@as(u24, 1), @as(u16, val) << 8 | val),
-            0xE0_0000...0xFF_FFFF => g.ram[addr & 0xFFFF] = val,
+            0xE0_0000...0xFF_FFFF => g.ram[addr & ram_mask] = val,
             else => {},
         }
     }
 
     pub fn write16(g: *Genesis, addr: u24, val: u16) void {
         switch (addr) {
-            0xA0_0000...0xA0_3FFF => wr16(&g.zram, addr & 0x1FFF, val),
+            0xA0_0000...0xA0_3FFF => wr16(&g.zram, addr & zram_mask, val),
             0xC0_0000...0xC0_0003 => g.v.writeData(val),
             0xC0_0004...0xC0_0007 => {
                 g.v.writeControl(val);
                 if (g.v.dma_request) g.dmaFrom68k();
             },
-            0xE0_0000...0xFF_FFFF => wr16(&g.ram, addr & 0xFFFF, val),
+            0xE0_0000...0xFF_FFFF => wr16(&g.ram, addr & ram_mask, val),
             else => g.write8(addr, @truncate(val >> 8)),
         }
     }
@@ -167,7 +172,7 @@ pub const Genesis = struct {
         return switch (addr & 0x1F) {
             0x01 => 0xA0, // export, NTSC, no expansion, VA0
             0x03 => g.padByte(),
-            0x05, 0x07 => if (g.pad_ctrl & 0x40 != 0) 0x7F else 0x3F, // no pad 2 or 3
+            0x05, 0x07 => if (g.pad_ctrl & th_bit != 0) 0x7F else 0x3F, // no pad 2 or 3
             0x09 => g.pad_ctrl,
             else => 0x00,
         };
@@ -184,13 +189,13 @@ pub const Genesis = struct {
     /// Three-button pad. TH is an output the ROM toggles to pick which half of
     /// the pad it sees; every button reads low when pressed.
     fn padByte(g: *Genesis) u8 {
-        const th = g.pad_ctrl & 0x40 == 0 or g.pad_data & 0x40 != 0;
+        const th = g.pad_ctrl & th_bit == 0 or g.pad_data & th_bit != 0;
         const b = g.buttons;
         const low: u8 = if (th)
             b & 0x3F // C B R L D U
         else
             (b & (btn_up | btn_down)) | ((b & btn_a) >> 2) | ((b & btn_start) >> 2);
-        return (if (th) @as(u8, 0x40) else 0) | (~low & 0x3F);
+        return (if (th) th_bit else 0) | (~low & 0x3F);
     }
 
     /// RESET pin semantics: while held (bit 0 clear), the Z80's registers
@@ -210,7 +215,7 @@ pub const Genesis = struct {
 
     pub fn z80Read8(g: *Genesis, addr: u16) u8 {
         return switch (addr) {
-            0x0000...0x3FFF => g.zram[addr & 0x1FFF],
+            0x0000...0x3FFF => g.zram[addr & zram_mask],
             0x4000...0x5FFF => 0, // YM2612: never busy
             0x7F00...0x7FFF => g.read8(0xC0_0000 | @as(u24, addr & 0x0F)),
             0x8000...0xFFFF => g.read8(g.z80BankAddr(addr)),
@@ -220,7 +225,7 @@ pub const Genesis = struct {
 
     pub fn z80Write8(g: *Genesis, addr: u16, val: u8) void {
         switch (addr) {
-            0x0000...0x3FFF => g.zram[addr & 0x1FFF] = val,
+            0x0000...0x3FFF => g.zram[addr & zram_mask] = val,
             // Loaded LSB-first: each write shifts the new bit into bit 8.
             0x6000...0x60FF => g.z80_bank = (g.z80_bank >> 1) | (@as(u9, val & 1) << 8),
             0x7F00...0x7FFF => g.write8(0xC0_0000 | @as(u24, addr & 0x0F), val),

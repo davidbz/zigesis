@@ -70,6 +70,10 @@ pub const Vdp = struct {
     pub fn hintReload(v: *const Vdp) u8 {
         return v.regs[10];
     }
+    /// Added to `addr` after every data-port access.
+    fn autoInc(v: *const Vdp) u8 {
+        return v.regs[15];
+    }
 
     fn word(v: *const Vdp, addr: u32) u16 {
         const a = addr & 0xFFFE;
@@ -115,7 +119,7 @@ pub const Vdp = struct {
         var len = v.dmaLength();
         while (len > 0) : (len -= 1) {
             v.vram[v.addr ^ 1] = b;
-            v.addr +%= v.regs[15];
+            v.addr +%= v.autoInc();
         }
         v.dmaDone();
     }
@@ -127,7 +131,7 @@ pub const Vdp = struct {
             8 => v.cram[(v.addr >> 1) & 0x3F],
             else => 0,
         };
-        v.addr +%= v.regs[15];
+        v.addr +%= v.autoInc();
         return val;
     }
 
@@ -145,7 +149,7 @@ pub const Vdp = struct {
             5 => v.vsram[(v.addr >> 1) % v.vsram.len] = val & 0x3FF,
             else => {},
         }
-        v.addr +%= v.regs[15];
+        v.addr +%= v.autoInc();
     }
 
     // -------------------------------------------------------------------- DMA
@@ -183,7 +187,7 @@ pub const Vdp = struct {
         while (len > 0) : (len -= 1) {
             v.vram[v.addr] = v.vram[src];
             src +%= 1;
-            v.addr +%= v.regs[15];
+            v.addr +%= v.autoInc();
         }
         v.dmaDone();
     }
@@ -209,17 +213,19 @@ pub const Vdp = struct {
         return .{ .pal = @as(u8, @truncate(e >> 13 & 3)) << 4 | c, .pri = e & 0x8000 != 0 };
     }
 
-    fn planeRow(v: *const Vdp, line: u32, plane: u32, out: *[width]Pix) void {
-        const cells_w: u32 = switch (v.regs[16] & 3) {
-            0 => 32,
-            3 => 128,
-            else => 64, // 2 is an invalid encoding; 64 is the sane reading
-        };
-        const cells_h: u32 = switch (v.regs[16] >> 4 & 3) {
+    /// One dimension of the plane-size register (16), in cells. 2 is an
+    /// invalid encoding; 64 is the sane reading.
+    fn planeCells(bits: u2) u32 {
+        return switch (bits) {
             0 => 32,
             3 => 128,
             else => 64,
         };
+    }
+
+    fn planeRow(v: *const Vdp, line: u32, plane: u32, out: *[width]Pix) void {
+        const cells_w = planeCells(@truncate(v.regs[16]));
+        const cells_h = planeCells(@truncate(v.regs[16] >> 4));
         const nt: u32 = if (plane == 0)
             @as(u32, v.regs[2] & 0x38) << 10
         else

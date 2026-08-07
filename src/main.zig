@@ -47,16 +47,12 @@ pub fn main(init: std.process.Init) !void {
     _ = args.skip();
     var path: []const u8 = default_rom;
     var shot_frames: ?u32 = null;
-    var shot_path: [:0]const u8 = try gpa.dupeZ(u8, "shot.png");
-    defer gpa.free(shot_path);
+    var shot_path: [:0]const u8 = "shot.png";
     var trace_z80 = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--shot")) {
             shot_frames = try std.fmt.parseInt(u32, args.next() orelse "60", 10);
-            if (args.next()) |p| {
-                gpa.free(shot_path);
-                shot_path = try gpa.dupeZ(u8, p);
-            }
+            if (args.next()) |p| shot_path = p;
         } else if (std.mem.eql(u8, arg, "--trace-z80")) {
             trace_z80 = true;
         } else path = arg;
