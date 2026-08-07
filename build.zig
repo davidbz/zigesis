@@ -90,12 +90,28 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(z80_harness_tests).step);
     check_step.dependOn(&z80_harness_tests.step);
 
-    const z80_sst = b.addExecutable(.{ .name = "z80-sst", .root_module = z80_harness_mod });
+    // The runner chews through 1.3 GiB of JSON across 1.6M cases: Debug takes
+    // ~2m40s where ReleaseFast takes ~30s, so it always builds fast no matter
+    // what -Doptimize says. Safety-checked coverage of the core still comes
+    // from the Debug unit/system tests above.
+    const z80_fast = b.createModule(.{
+        .root_source_file = b.path("src/z80/root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    const z80_sst = b.addExecutable(.{
+        .name = "z80-sst",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/z80_sst_test.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{.{ .name = "z80", .module = z80_fast }},
+        }),
+    });
     b.installArtifact(z80_sst);
 
     const z80_sst_run = b.addRunArtifact(z80_sst);
     z80_sst_run.setCwd(b.path(".")); // testdata/ is resolved relative to the project
-    z80_sst_run.step.dependOn(b.getInstallStep());
     if (b.args) |args| z80_sst_run.addArgs(args);
     b.step("z80-sst", "Run the Z80 SingleStepTests conformance suite (needs testdata/z80/)")
         .dependOn(&z80_sst_run.step);
