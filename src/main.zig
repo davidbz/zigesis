@@ -41,7 +41,8 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
 
-    var args = std.process.Args.Iterator.init(init.minimal.args);
+    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, gpa);
+    defer args.deinit();
     _ = args.skip();
     var path: []const u8 = default_rom;
     var shot_frames: ?u32 = null;
