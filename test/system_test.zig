@@ -1,6 +1,6 @@
-//! Headless frame-hash regression suite: boots a ROM with no window, no
-//! raylib anywhere in its import graph, and hashes the framebuffer at a few
-//! fixed checkpoints.
+//! Headless frame-hash and audio regression suite: boots a ROM with no
+//! window, no raylib anywhere in its import graph, and hashes the
+//! framebuffer (and the resampled PSG output) at a few fixed checkpoints.
 //!
 //! Commercial ROMs are never committed or fetched (DESIGN.md §10): this
 //! test looks for one in `roms/`, gitignored, and skips cleanly when it is
@@ -59,4 +59,38 @@ test "Sonic 1 boots headless and renders the same frames every run" {
         try std.testing.expectEqual(checkpoints[next].expected, frameHash(g));
         next += 1;
     }
+}
+
+const audio_frames_to_hash = 120; // two seconds of NTSC frames: the Sega logo jingle and into the title theme
+const audio_expected: u64 = 0x77e8a7c78bf0fe84;
+
+test "Sonic 1's PSG audio resamples to the same bytes every run" {
+    const rom = std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        rom_path,
+        std.testing.allocator,
+        .limited(max_rom_bytes),
+    ) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    defer std.testing.allocator.free(rom);
+
+    var c = Cpu{};
+    const g = try std.testing.allocator.create(Genesis);
+    defer std.testing.allocator.destroy(g);
+    g.* = .{ .rom = rom, .cpu = &c };
+    Core.reset(&c, g);
+
+    var hasher = std.hash.Wyhash.init(0);
+    var frame: u32 = 0;
+    while (frame < audio_frames_to_hash) : (frame += 1) {
+        try std.testing.expect(!c.halted);
+        scheduler.runFrame(g, &c);
+        // Drained every frame so the fixed-size ring never drops samples,
+        // exactly as `main.zig`'s frontend loop drains it every frame.
+        while (g.audio.pop()) |s| hasher.update(std.mem.asBytes(&s));
+    }
+
+    try std.testing.expectEqual(audio_expected, hasher.final());
 }

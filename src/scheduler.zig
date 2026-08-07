@@ -19,9 +19,11 @@ const mclk_per_cpu = genesis.mclk_per_cpu;
 const mclk_per_z80 = genesis.mclk_per_z80;
 const mclk_per_line = genesis.mclk_per_line;
 const lines_per_frame = genesis.lines_per_frame;
+const psg_divider = genesis.psg_divider;
+const psg_hz = genesis.psg_hz;
 
 /// The 68000's effective clock, derived from the master clock and its divider.
-pub const cpu_hz = 53_693_175.0 / @as(f64, mclk_per_cpu);
+pub const cpu_hz = genesis.master_clock_hz / @as(f64, mclk_per_cpu);
 
 const vint_level: u3 = 6;
 const hint_level: u3 = 4;
@@ -30,6 +32,7 @@ pub fn runFrame(g: *Genesis, c: *Cpu) void {
     g.line = 0;
     while (g.line < lines_per_frame) : (g.line += 1) {
         runZ80Line(g);
+        runPsgLine(g);
 
         // The H-int counter reloads throughout blanking and counts down
         // once per line over the active display.
@@ -74,6 +77,19 @@ fn runZ80Line(g: *Genesis) void {
         if (g.z80_trace) traceZ80(g);
         Z80Core.step(&g.z, g);
     }
+}
+
+/// The PSG's share of a line's master clock. Unlike the Z80, its clock is
+/// never gated: the chip is on the VDP die and runs off the system clock
+/// regardless of what the Z80 CPU is doing.
+fn runPsgLine(g: *Genesis) void {
+    g.psg_clk_debt += mclk_per_line;
+    const divider = mclk_per_z80 * psg_divider;
+    const budget = g.psg_clk_debt / divider;
+    g.psg_clk_debt %= divider;
+
+    var i: u64 = 0;
+    while (i < budget) : (i += 1) g.audio.pushPsg(g.p.step(), psg_hz);
 }
 
 fn traceZ80(g: *Genesis) void {
@@ -147,6 +163,30 @@ test "mclk_debt carries the sub-cycle remainder so a frame's clock does not drif
 
     runFrame(&g, &c);
     try testing.expectEqual(@as(u64, (2 * mclk_per_frame) % mclk_per_cpu), g.mclk_debt);
+}
+
+test "psg_clk_debt carries the sub-cycle remainder so its output rate does not drift" {
+    var c = Cpu{};
+    var g = spinGenesis(&c);
+
+    const mclk_per_frame = mclk_per_line * lines_per_frame;
+    const psg_divisor = mclk_per_z80 * genesis.psg_divider;
+
+    runFrame(&g, &c);
+    try testing.expectEqual(@as(u64, mclk_per_frame % psg_divisor), g.psg_clk_debt);
+
+    runFrame(&g, &c);
+    try testing.expectEqual(@as(u64, (2 * mclk_per_frame) % psg_divisor), g.psg_clk_debt);
+}
+
+test "the PSG clock runs every line regardless of Z80 busreq/reset state" {
+    var c = Cpu{};
+    var g = spinGenesis(&c);
+    g.z80_busreq = true; // Z80 held off the bus the whole frame
+
+    runFrame(&g, &c);
+
+    try testing.expect(g.audio.len > 0);
 }
 
 test "runFrame raises VBlank once per frame and leaves it pending until the CPU takes it" {
