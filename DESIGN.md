@@ -368,7 +368,7 @@ releasing the Z80 doesn't burst-execute a backlog it never had. `--trace-z80`
 prints a `[frame line cycle]`-prefixed PC/opcode/register line per Z80
 instruction to stderr.
 
-### M2: PSG and the audio pipeline — done
+### M2: PSG and the audio pipeline
 
 Deliverables: SN76489 core; mixing/resampling/ring-buffer pipeline;
 raylib AudioStream output; audio-driven frame pacing; volume option.
@@ -376,23 +376,6 @@ Acceptance: PSG-only audio (SFX in many games, full music in some) plays
 clean and pitch-correct; emulator speed locks to audio without drift over
 a 10-minute headless run; a pinned-hash audio regression test (hash of N
 resampled samples for a scripted input log) passes.
-
-`src/psg.zig` is a from-scratch SN76489: three tone channels plus noise,
-the documented tone-period-0 DC quirk used for sample-playback tricks, and
-a comptime-generated 2 dB attenuation table (SMS Power's register format
-and LFSR taps — DESIGN.md §7/§11). `src/audio.zig` owns a fixed-size
-`Mixer`: a linear-interpolation downsampler carrying its fractional phase
-across calls exactly like `genesis.zig`'s `mclk_debt`, into a fixed-size
-ring buffer (no allocation, no raylib import). `scheduler.zig` steps the
-PSG once per line at its native mclk/(15*16) rate — ungated by Z80
-BUSREQ/RESET, since the chip is on the VDP die and runs off the system
-clock regardless of what the Z80 CPU is doing — with its own carried
-remainder, `psg_clk_debt`. `main.zig` is the only consumer of raylib's
-`AudioStream`: it polls `IsAudioStreamProcessed`, drains the ring into it,
-and paces the frame loop off the ring's fill level (sleep once buffered
-audio exceeds a 50ms target, run flat out otherwise) instead of a fixed
-target FPS, per §6.1/§6.2. `--volume N` (0-100) scales samples in the
-mixer before they reach the ring.
 
 ### M3: YM2612
 

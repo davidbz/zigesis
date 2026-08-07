@@ -20,12 +20,8 @@ for the full plan and acceptance criteria):
 - **M1 — Z80 core and bus integration: done.** A from-scratch Z80 core,
   exact on the full SingleStepTests/z80 conformance corpus, wired into the
   machine with real BUSREQ/RESET semantics and the banked 68k-bus window.
-- **M2 — PSG and the audio pipeline: done.** A from-scratch SN76489 core,
-  a resampling mixer and ring buffer with no allocation and no raylib
-  import, and a raylib `AudioStream` frontend whose frame pacing is driven
-  by the ring buffer's fill level rather than a fixed target FPS.
-- **M3 and later** (YM2612, VDP completion, save states, debug tooling,
-  compatibility pass) are not started.
+- **M2 and later** (PSG, YM2612, save states, debug tooling, compatibility
+  pass) are not started. No audio is audible yet.
 
 ## Requirements
 
@@ -60,7 +56,6 @@ zig build run -Doptimize=ReleaseFast   # roms/Sonic-the-Hedgehog.bin
 zig build run -- path/to/other.bin     # a specific ROM
 zig build run -- --shot 600 shot.png   # headless: run N frames, write a PNG
 zig build run -- --trace-z80           # Z80 instruction trace to stderr
-zig build run -- --volume 50           # 0-100, default 100
 ```
 
 Controls: arrow keys for the d-pad, A/S/D for buttons A/B/C, Enter for
@@ -72,14 +67,13 @@ Start.
 zig build test
 ```
 
-Runs, per module: VDP, Z80, PSG, audio mixer, `genesis` (memory map and
-bus), and `scheduler` (timing and interrupts) unit tests, plus two small
-Z80 conformance-harness unit tests. It also runs the headless frame-hash
-and audio-hash regression suite (`test/system_test.zig`), which boots
-`roms/Sonic-the-Hedgehog.bin` and checks the framebuffer and resampled PSG
-output against pinned hashes at a few fixed frames — this ROM is never
-committed, so the test looks for it in the gitignored `roms/` directory
-and skips cleanly when it is absent (always true in CI).
+Runs, per module: VDP, Z80, `genesis` (memory map and bus), and `scheduler`
+(timing and interrupts) unit tests, plus two small Z80 conformance-harness
+unit tests. It also runs the headless frame-hash regression suite
+(`test/system_test.zig`), which boots `roms/Sonic-the-Hedgehog.bin` and
+checks the framebuffer against pinned hashes at a few fixed frames — this
+ROM is never committed, so the test looks for it in the gitignored `roms/`
+directory and skips cleanly when it is absent (always true in CI).
 
 ### Z80 conformance suite
 
@@ -118,8 +112,6 @@ src/
   genesis.zig         machine state and bus: memory map, arbitration, BUSREQ/RESET
   scheduler.zig       master-clock accounting, per-scanline stepping, interrupts
   vdp.zig             video display processor (315-5313)
-  psg.zig             SN76489 PSG: tone/noise channels, attenuation
-  audio.zig           mixing, resampling, the ring buffer that feeds raylib
   z80/
     cpu.zig           architectural state: registers, flags, interrupt latches
     decode.zig        opcode field decomposition, register tables
@@ -127,7 +119,7 @@ src/
     core.zig          fetch/decode/execute; Core(comptime Bus), same shape as z68k
     root.zig          barrel module
 test/
-  system_test.zig     headless frame-hash and audio-hash regression suite
+  system_test.zig     headless frame-hash regression suite
   z80_sst_test.zig    SingleStepTests/z80 conformance runner
 tools/
   fetch_z80_tests.sh  fetches the Z80 conformance corpus into testdata/
@@ -151,7 +143,7 @@ CPU and machine:
 - [SingleStepTests](https://github.com/SingleStepTests) — the m68000 and
   z80 conformance suites both CPU cores are validated against.
 
-Audio (for M3, the YM2612, not yet implemented):
+Audio (for milestones M2 and M3, not yet implemented):
 
 - [Nuked-OPN2](https://github.com/nukeykt/Nuked-OPN2) — die-shot-accurate
   YM2612/YM3438 core, the ground truth for FM synthesis validation.

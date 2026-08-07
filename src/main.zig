@@ -4,12 +4,10 @@
 //!     zig build run -- roms/other.bin
 //!     zig build run -- --shot 600 shot.png              # headless: N frames, then a PNG
 //!     zig build run -- --trace-z80                      # Z80 instruction trace to stderr
-//!     zig build run -- --volume 50                      # 0-100, default 100
 //!
-//! Owns raylib: window, texture upload, audio stream, input polling, and
-//! the headless --shot path. Everything under `genesis`, `scheduler`,
-//! `vdp` and `audio` is plain data and functions with no knowledge of any
-//! of this.
+//! Owns raylib: window, texture upload, input polling, and the headless
+//! --shot path. Everything under `genesis`, `scheduler` and `vdp` is plain
+//! data and functions with no knowledge of any of this.
 //!
 //! Keys: arrows, A/S/D = A/B/C, Enter = Start.
 
@@ -17,7 +15,6 @@ const std = @import("std");
 const genesis = @import("genesis");
 const scheduler = @import("scheduler");
 const vdp = @import("vdp");
-const audio = @import("audio");
 
 const rl = @cImport(@cInclude("raylib.h"));
 
@@ -27,17 +24,6 @@ const Core = genesis.Core;
 
 const default_rom = "roms/Sonic-the-Hedgehog.bin";
 const scale = 3;
-const audio_sample_size = 16; // s16
-const audio_channels = 2;
-
-/// Frame pacing targets this much buffered audio: short enough not to add
-/// noticeable input lag, long enough to absorb a slow frame without the
-/// stream underrunning. This is the "audio-driven" pacing DESIGN.md §6.2
-/// calls for: sleep when there's a surplus, run flat out when there isn't.
-const audio_target_ms = 50;
-/// One drain covers at most this many frames — comfortably more than the
-/// ~800 a single 60Hz video frame produces at 48kHz, even after a stall.
-const audio_chunk_frames = 4096;
 
 fn pollInput(g: *Genesis) void {
     var b: u8 = 0;
@@ -52,28 +38,6 @@ fn pollInput(g: *Genesis) void {
     g.buttons = b;
 }
 
-/// Drains whatever the mixer has ready into raylib's stream, only when it's
-/// asked for more: matches the polling pattern raylib's own audio-stream
-/// example uses, so no callback thread or synchronization is needed.
-fn drainAudio(g: *Genesis, stream: rl.AudioStream) void {
-    if (!rl.IsAudioStreamProcessed(stream)) return;
-
-    var pcm: [audio_chunk_frames]audio.Frame = undefined;
-    var n: usize = 0;
-    while (n < pcm.len) : (n += 1) pcm[n] = g.audio.pop() orelse break;
-    if (n > 0) rl.UpdateAudioStream(stream, &pcm, @intCast(n));
-}
-
-/// Sleeps off any surplus once the ring buffer is comfortably ahead of
-/// playback; falling behind (buffer below target, or empty) runs the next
-/// frame immediately instead, so the emulator catches back up on its own.
-fn paceToAudio(g: *Genesis, io: std.Io) void {
-    const buffered_ms = g.audio.len * 1000 / audio.sample_rate;
-    if (buffered_ms <= audio_target_ms) return;
-    const surplus_ms: i64 = @intCast(buffered_ms - audio_target_ms);
-    io.sleep(.fromMilliseconds(surplus_ms), .awake) catch {};
-}
-
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -85,15 +49,12 @@ pub fn main(init: std.process.Init) !void {
     var shot_frames: ?u32 = null;
     var shot_path: [:0]const u8 = "shot.png";
     var trace_z80 = false;
-    var volume_pct: u8 = 100;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--shot")) {
             shot_frames = try std.fmt.parseInt(u32, args.next() orelse "60", 10);
             if (args.next()) |p| shot_path = p;
         } else if (std.mem.eql(u8, arg, "--trace-z80")) {
             trace_z80 = true;
-        } else if (std.mem.eql(u8, arg, "--volume")) {
-            volume_pct = @min(100, try std.fmt.parseInt(u8, args.next() orelse "100", 10));
         } else path = arg;
     }
 
@@ -108,7 +69,6 @@ pub fn main(init: std.process.Init) !void {
     const g = try gpa.create(Genesis);
     defer gpa.destroy(g);
     g.* = .{ .rom = image, .cpu = &c, .z80_trace = trace_z80 };
-    g.audio.volume_pct = volume_pct;
 
     Core.reset(&c, g);
     std.debug.print("{s}: {d} KiB, reset pc={x:0>6} sp={x:0>8}\n", .{
@@ -134,6 +94,7 @@ pub fn main(init: std.process.Init) !void {
             return error.NoDisplay;
         }
         defer rl.CloseWindow();
+        rl.SetTargetFPS(60);
         const tex = rl.LoadTextureFromImage(.{
             .data = &g.v.fb,
             .width = vdp.width,
@@ -141,13 +102,6 @@ pub fn main(init: std.process.Init) !void {
             .mipmaps = 1,
             .format = rl.PIXELFORMAT_UNCOMPRESSED_R8G8B8A8,
         });
-
-        rl.InitAudioDevice();
-        defer rl.CloseAudioDevice();
-        const stream = rl.LoadAudioStream(audio.sample_rate, audio_sample_size, audio_channels);
-        defer rl.UnloadAudioStream(stream);
-        rl.PlayAudioStream(stream);
-
         while (!rl.WindowShouldClose() and !c.halted) : (frames += 1) {
             pollInput(g);
             scheduler.runFrame(g, &c);
@@ -162,8 +116,6 @@ pub fn main(init: std.process.Init) !void {
                 .{ .r = 255, .g = 255, .b = 255, .a = 255 },
             );
             rl.EndDrawing();
-            drainAudio(g, stream);
-            paceToAudio(g, io);
         }
     }
 

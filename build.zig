@@ -19,16 +19,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const psg = b.addModule("psg", .{
-        .root_source_file = b.path("src/psg.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const audio = b.addModule("audio", .{
-        .root_source_file = b.path("src/audio.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
     const genesis = b.addModule("genesis", .{
         .root_source_file = b.path("src/genesis.zig"),
         .target = target,
@@ -37,8 +27,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "m68k", .module = m68k },
             .{ .name = "vdp", .module = vdp },
             .{ .name = "z80", .module = z80 },
-            .{ .name = "psg", .module = psg },
-            .{ .name = "audio", .module = audio },
         },
     });
     const scheduler = b.addModule("scheduler", .{
@@ -66,14 +54,6 @@ pub fn build(b: *std.Build) void {
     const z80_tests = b.addTest(.{ .root_module = z80 });
     test_step.dependOn(&b.addRunArtifact(z80_tests).step);
     check_step.dependOn(&z80_tests.step);
-
-    const psg_tests = b.addTest(.{ .root_module = psg });
-    test_step.dependOn(&b.addRunArtifact(psg_tests).step);
-    check_step.dependOn(&psg_tests.step);
-
-    const audio_tests = b.addTest(.{ .root_module = audio });
-    test_step.dependOn(&b.addRunArtifact(audio_tests).step);
-    check_step.dependOn(&audio_tests.step);
 
     const genesis_tests = b.addTest(.{ .root_module = genesis });
     test_step.dependOn(&b.addRunArtifact(genesis_tests).step);
@@ -143,6 +123,7 @@ pub fn build(b: *std.Build) void {
     if (b.lazyDependency("raylib", .{
         .target = target,
         .optimize = optimize,
+        .raudio = false, // no sound emulation yet, so nothing to play it with
         .rmodels = false,
     })) |raylib_dep| {
         const zigesis = b.addExecutable(.{
@@ -156,7 +137,6 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "genesis", .module = genesis },
                     .{ .name = "scheduler", .module = scheduler },
                     .{ .name = "vdp", .module = vdp },
-                    .{ .name = "audio", .module = audio },
                 },
             }),
         });
