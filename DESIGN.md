@@ -326,7 +326,7 @@ Each milestone is a shippable deliverable with acceptance criteria. Do them
 in order; do not start a milestone with the previous one's tests red. One
 milestone per PR-chain, small PRs within it.
 
-### M0: Project scaffold and regression harness
+### M0: Project scaffold and regression harness — done
 
 Deliverables: new repo consuming z68k and raylib as dependencies; PoC code
 ported into the `src/` layout of section 3.1 unchanged in behavior; headless
@@ -334,6 +334,12 @@ frame-hash test runner; CI (build, fmt, tests) on Linux/macOS/Windows.
 Acceptance: Sonic 1 boots and plays as in the PoC; `zig build test` runs a
 headless Sonic boot and matches pinned frame hashes; no raylib symbol is
 reachable from emulation modules.
+
+`vdp`, `genesis` and `scheduler` are separate Zig modules with no path to
+raylib in their import graph, so the no-raylib-in-emulation rule is enforced
+by the build graph, not just convention — only `main.zig` imports it.
+`test/system_test.zig` skips cleanly when `roms/` has no ROM (always true in
+CI, per §10) and gates on pinned hashes when one is present locally.
 
 ### M1: Z80 core and bus integration
 

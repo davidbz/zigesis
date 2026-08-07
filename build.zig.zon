@@ -1,0 +1,24 @@
+.{
+    .name = .zgen,
+    .version = "0.0.0",
+    .fingerprint = 0xdade91fc35be832e,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .z68k = .{
+            .url = "git+https://github.com/davidbz/z68k?ref=v0.0.1#6c7d2b1587e4ef87003b9fecc871309d10cabf8a",
+            .hash = "z68k-0.0.1-F4jI29FTBAAqjPtlkDoT0xdLEiQSpQP-Off1b5iDW0S3",
+        },
+        .raylib = .{
+            .url = "git+https://github.com/raysan5/raylib#a55d49b754fa157a539666d772135bdb26ae9da0",
+            .hash = "raylib-6.0.0-whq8uAYyPAW1tLAXFW3-RSAAkdqivRstBPwsCqjQEbd1",
+            .lazy = true,
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "test",
+        "DESIGN.md",
+    },
+}
