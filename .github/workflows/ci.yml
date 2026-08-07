@@ -70,6 +70,9 @@ jobs:
             zig-${{ runner.os }}-
       - name: Compile check
         run: zig build check
+      - name: Fetch test ROM
+        shell: bash
+        run: tools/fetch_test_roms.sh
       - name: Run tests
         run: zig build test
 

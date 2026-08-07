@@ -52,10 +52,9 @@ are never distributed by this project — supply your own legally obtained
 copy.
 
 ```
-zig build run -Doptimize=ReleaseFast   # roms/Sonic-the-Hedgehog.bin
-zig build run -- path/to/other.bin     # a specific ROM
-zig build run -- --shot 600 shot.png   # headless: run N frames, write a PNG
-zig build run -- --trace-z80           # Z80 instruction trace to stderr
+zig build run -Doptimize=ReleaseFast -- path/to/rom.bin
+zig build run -- rom.bin --shot 600 shot.png   # headless: run N frames, write a PNG
+zig build run -- rom.bin --trace-z80           # Z80 instruction trace to stderr
 ```
 
 Controls: arrow keys for the d-pad, A/S/D for buttons A/B/C, Enter for
@@ -70,10 +69,12 @@ zig build test
 Runs, per module: VDP, Z80, `genesis` (memory map and bus), and `scheduler`
 (timing and interrupts) unit tests, plus two small Z80 conformance-harness
 unit tests. It also runs the headless frame-hash regression suite
-(`test/system_test.zig`), which boots `roms/Sonic-the-Hedgehog.bin` and
-checks the framebuffer against pinned hashes at a few fixed frames — this
-ROM is never committed, so the test looks for it in the gitignored `roms/`
-directory and skips cleanly when it is absent (always true in CI).
+(`test/system_test.zig`), which boots
+[Cave Story MD](https://github.com/andwn/cave-story-md) — a freely
+distributable open-source homebrew — and checks the framebuffer against
+pinned hashes at a few fixed frames. Fetch the ROM once with
+`tools/fetch_test_roms.sh` (pinned to a release tag, into the gitignored
+`roms/`); the test skips cleanly when it is absent.
 
 ### Z80 conformance suite
 
@@ -122,6 +123,7 @@ test/
   system_test.zig     headless frame-hash regression suite
   z80_sst_test.zig    SingleStepTests/z80 conformance runner
 tools/
+  fetch_test_roms.sh  fetches the free test ROM for the regression suite into roms/
   fetch_z80_tests.sh  fetches the Z80 conformance corpus into testdata/
 ```
 

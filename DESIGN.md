@@ -13,8 +13,8 @@ architectural state, cycle counts, and data-space bus cycles). This project
 supplies the rest of the machine and a small, polished desktop frontend.
 
 A proof of concept already exists on the `genesis` branch of z68k
-(`examples/genesis.zig`, `examples/genesis_vdp.zig`) and boots Sonic the
-Hedgehog with per-scanline video, controller input, interrupts, and frame
+(`examples/genesis.zig`, `examples/genesis_vdp.zig`) and boots commercial
+games with per-scanline video, controller input, interrupts, and frame
 timing. Treat it as reference-quality starting material, not throwaway code.
 
 Reference PoC: https://github.com/davidbz/z68k/tree/genesis
@@ -334,15 +334,16 @@ milestone per PR-chain, small PRs within it.
 Deliverables: new repo consuming z68k and raylib as dependencies; PoC code
 ported into the `src/` layout of section 3.1 unchanged in behavior; headless
 frame-hash test runner; CI (build, fmt, tests) on Linux/macOS/Windows.
-Acceptance: Sonic 1 boots and plays as in the PoC; `zig build test` runs a
-headless Sonic boot and matches pinned frame hashes; no raylib symbol is
-reachable from emulation modules.
+Acceptance: commercial games boot and play as in the PoC; `zig build test`
+boots a freely distributable homebrew ROM headless and matches pinned frame
+hashes; no raylib symbol is reachable from emulation modules.
 
 `vdp`, `genesis` and `scheduler` are separate Zig modules with no path to
 raylib in their import graph, so the no-raylib-in-emulation rule is enforced
 by the build graph, not just convention — only `main.zig` imports it.
-`test/system_test.zig` skips cleanly when `roms/` has no ROM (always true in
-CI, per §10) and gates on pinned hashes when one is present locally.
+`test/system_test.zig` boots Cave Story MD, a freely distributable
+open-source homebrew fetched by `tools/fetch_test_roms.sh` and pinned to a
+release tag; it skips cleanly when the ROM has not been fetched.
 
 ### M1: Z80 core and bus integration — done
 
@@ -382,20 +383,20 @@ resampled samples for a scripted input log) passes.
 Deliverables: FM core (phase generator, envelope generator, operators,
 algorithms, LFO, timers, channel 6 DAC mode); stereo panning; ladder-effect
 option; per-channel mute (debug); integration at the correct divider.
-Acceptance: Sonic 1 and Streets of Rage 2 soundtracks are recognizably
+Acceptance: well-known FM-heavy commercial soundtracks are recognizably
 correct in pitch, tempo, and instrument character; DAC drums/voices play;
 register-log comparison against Nuked-OPN2 shows matching envelope shapes
 on a test bank; audio regression hashes pinned.
 
 ### M4: VDP completion
 
-Deliverables: shadow/highlight, H32 mode, interlace (including double-
-resolution mode used by Sonic 2 two-player), per-line sprite and pixel
-limits, sprite masking, PAL (313-line, V30) timing, region selection.
+Deliverables: shadow/highlight, H32 mode, interlace (including the double-
+resolution mode used by two-player split-screen games), per-line sprite and
+pixel limits, sprite masking, PAL (313-line, V30) timing, region selection.
 Acceptance: a curated screenshot suite (title screens and known-tricky
 scenes across around 10 games, both H32 and H40, NTSC and PAL) matches
-pinned hashes; Sonic 2 two-player mode renders; overdraw-heavy scenes
-flicker like hardware instead of showing extra sprites.
+pinned hashes; interlaced double-resolution mode renders; overdraw-heavy
+scenes flicker like hardware instead of showing extra sprites.
 
 ### M5: Frontend shell
 
@@ -412,7 +413,7 @@ Deliverables: versioned save states with slots, menu entries, and hotkeys;
 SRAM saves with header parsing; SSF2 mapper; TMSS write acceptance.
 Acceptance: save/load round-trips mid-gameplay are bit-identical under the
 deterministic replay harness (save, run N frames, load, run N frames,
-identical hashes); Sonic 3 retains progress across restarts via SRAM;
+identical hashes); an SRAM-backed game retains progress across restarts;
 Super Street Fighter II boots and switches banks.
 
 ### M7: Debug tooling

@@ -2,11 +2,11 @@
 //!
 //! Knows nothing about the 68000 or the bus: `genesis.zig` forwards port
 //! accesses here and runs the one DMA mode that needs to read the 68k bus.
-//! Rendering is per scanline, which is what line-scroll effects (Sonic's
-//! water, the title screen's wobble) need and no more.
+//! Rendering is per scanline, which is what line-scroll effects (water
+//! surfaces, title-screen wobble) need and no more.
 //!
 //! Deliberately absent: shadow/highlight, interlace, H32 mode, the per-line
-//! sprite/pixel limits and sprite masking. Nothing in Sonic 1 uses them, and
+//! sprite/pixel limits and sprite masking. Most games never touch them, and
 //! each is a self-contained addition to the pixel loop below (see M4 in
 //! DESIGN.md).
 
