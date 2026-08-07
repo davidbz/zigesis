@@ -1,0 +1,30 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug zigesis",
+            "program": "${workspaceFolder}/zig-out/bin/zigesis",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "zig build"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug zigesis (with args)",
+            "program": "${workspaceFolder}/zig-out/bin/zigesis",
+            "args": ["${input:programArgs}"],
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "zig build"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "programArgs",
+            "type": "promptString",
+            "description": "Program arguments"
+        }
+    ]
+}

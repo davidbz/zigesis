@@ -1,0 +1,37 @@
+version: 2
+updates:
+  # Keep GitHub Actions pinned to up-to-date tags/SHAs.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "06:00"
+      timezone: "UTC"
+    groups:
+      actions:
+        patterns: ["*"]   # Batch all action bumps into one PR
+    labels:
+      - "dependencies"
+
+  # Keep the devcontainer base image current.
+  - package-ecosystem: "docker"
+    directory: "/.devcontainer"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "06:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
+
+  # Keep Python dev dependencies (uv.lock) current.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "06:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"

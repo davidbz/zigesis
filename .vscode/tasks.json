@@ -1,0 +1,77 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "zig build",
+            "type": "shell",
+            "command": "zig build",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            },
+            "problemMatcher": {
+                "owner": "zig",
+                "fileLocation": ["relative", "${workspaceFolder}"],
+                "pattern": {
+                    "regexp": "^(.+):(\\d+):(\\d+): (error|warning|note): (.+)$",
+                    "file": 1,
+                    "line": 2,
+                    "column": 3,
+                    "severity": 4,
+                    "message": 5
+                }
+            }
+        },
+        {
+            "label": "zig build test",
+            "type": "shell",
+            "command": "zig build test --summary all",
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "zig build run",
+            "type": "shell",
+            "command": "zig build run",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "zig build check",
+            "type": "shell",
+            "command": "zig build check",
+            "group": "build",
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "zig build test --fuzz",
+            "type": "shell",
+            "command": "zig build test --fuzz",
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        }
+    ]
+}

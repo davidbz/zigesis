@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: "0.16.0"
+      - name: Check formatting
+        run: zig fmt --check src/
+
+  lint-actions:
+    name: Lint workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
+
+  test:
+    name: Test / ${{ matrix.os }} / Zig ${{ matrix.zig }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest] #os: [ubuntu-latest, ubuntu-latest]
+        zig: ["0.16.0"]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: ${{ matrix.zig }}
+      # Cache the Zig build cache to speed up incremental builds.
+      # Key includes the zon hash so a dep change busts it correctly.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+            ~/Library/Caches/zig
+          key: zig-${{ runner.os }}-${{ matrix.zig }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            zig-${{ runner.os }}-${{ matrix.zig }}-
+            zig-${{ runner.os }}-
+      - name: Compile check
+        run: zig build check
+      - name: Run tests
+        run: zig build test

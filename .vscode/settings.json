@@ -1,0 +1,29 @@
+{
+    "[zig]": {
+        "editor.defaultFormatter": "ziglang.vscode-zig",
+        "editor.formatOnSave": true,
+        "editor.tabSize": 4,
+        "editor.insertSpaces": true
+    },
+    "zig.path": "/usr/local/bin/zig",
+    "zig.zls.enabled": "on",
+    "files.associations": {
+        "*.zon": "zig"
+    },
+    "editor.inlayHints.enabled": "on",
+    "files.trimTrailingWhitespace": true,
+    "files.insertFinalNewline": true,
+    "files.exclude": {
+        "**/.git": true,
+        "**/node_modules": true,
+        "**/*.js.map": true,
+        "**/__pycache__": true,
+        "**/*.pyc": true,
+        "**/.pytest_cache": true,
+        "**/.serena": true,
+        "**/.ruff_cache": true,
+        "**/.zig-cache": true,
+        "**/.venv": true,
+        "**/.tokensave": true,
+    }
+}

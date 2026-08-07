@@ -1,0 +1,30 @@
+{
+  "name": "zigesis",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ziglang.vscode-zig",
+        "vadimcn.vscode-lldb",
+        "donjayamanne.githistory",
+        "GitHub.vscode-pull-request-github"
+      ]
+    }
+  },
+  "postCreateCommand": "zig version",
+  "remoteUser": "vscode",
+  "capAdd": [
+    "SYS_PTRACE"
+  ],
+  "securityOpt": [
+    "seccomp=unconfined"
+  ],
+  "mounts": [
+    "source=code-bashhistory,target=/commandhistory,type=volume"
+  ],
+  "containerEnv": {
+    "ZIG_DEBUGGER": "lldb"
+  }
+}
