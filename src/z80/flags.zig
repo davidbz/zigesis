@@ -46,9 +46,8 @@ pub fn add(c: *Cpu, x: u8, y: u8, carry_in: bool) u8 {
     return z;
 }
 
-/// SUB/SBC/CP A,x. CP discards the result and takes its X/Y from the
-/// *operand* rather than the (discarded) result — every other flag matches
-/// a real subtraction.
+/// SUB/SBC A,x (also CP's core — see `cp`) and the 16-bit half-subtract
+/// SBC HL,rr uses on its low and high bytes.
 pub fn sub(c: *Cpu, x: u8, y: u8, carry_in: bool) u8 {
     const full: u16 = @as(u16, x) -% y -% @intFromBool(carry_in);
     const z: u8 = @truncate(full);
@@ -67,44 +66,40 @@ pub fn sub(c: *Cpu, x: u8, y: u8, carry_in: bool) u8 {
     return z;
 }
 
+/// CP A,x: a SUB whose result is discarded, with X/Y taken from the
+/// *operand* rather than the discarded result — every other flag matches
+/// a real subtraction.
 pub fn cp(c: *Cpu, x: u8, y: u8) void {
-    const full: u16 = @as(u16, x) -% y;
-    const z: u8 = @truncate(full);
+    _ = sub(c, x, y, false);
     const v = xy(y);
-    c.f = .{
-        .c = full & 0x100 != 0,
-        .n = true,
-        .pv = ((x ^ y) & (x ^ z)) & 0x80 != 0,
-        .x = v.x,
-        .h = (x ^ y ^ z) & 0x10 != 0,
-        .y = v.y,
-        .z = z == 0,
-        .s = z & 0x80 != 0,
-    };
+    c.f.x = v.x;
+    c.f.y = v.y;
+    c.q = c.f.toInt() != 0;
+}
+
+/// AND/OR/XOR's shared flag tail: C=0, N=0, P/V=parity; only H differs
+/// (set for AND, clear for OR/XOR).
+fn logicFlags(c: *Cpu, z: u8, h: bool) void {
+    const v = xy(z);
+    c.f = .{ .c = false, .n = false, .pv = parity(z), .x = v.x, .h = h, .y = v.y, .z = z == 0, .s = z & 0x80 != 0 };
     c.q = c.f.toInt() != 0;
 }
 
 pub fn andOp(c: *Cpu, x: u8, y: u8) u8 {
     const z = x & y;
-    const v = xy(z);
-    c.f = .{ .c = false, .n = false, .pv = parity(z), .x = v.x, .h = true, .y = v.y, .z = z == 0, .s = z & 0x80 != 0 };
-    c.q = c.f.toInt() != 0;
+    logicFlags(c, z, true);
     return z;
 }
 
 pub fn orOp(c: *Cpu, x: u8, y: u8) u8 {
     const z = x | y;
-    const v = xy(z);
-    c.f = .{ .c = false, .n = false, .pv = parity(z), .x = v.x, .h = false, .y = v.y, .z = z == 0, .s = z & 0x80 != 0 };
-    c.q = c.f.toInt() != 0;
+    logicFlags(c, z, false);
     return z;
 }
 
 pub fn xorOp(c: *Cpu, x: u8, y: u8) u8 {
     const z = x ^ y;
-    const v = xy(z);
-    c.f = .{ .c = false, .n = false, .pv = parity(z), .x = v.x, .h = false, .y = v.y, .z = z == 0, .s = z & 0x80 != 0 };
-    c.q = c.f.toInt() != 0;
+    logicFlags(c, z, false);
     return z;
 }
 

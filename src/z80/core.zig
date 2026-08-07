@@ -50,7 +50,7 @@ pub fn Core(comptime Bus: type) type {
                 // The CPU keeps fetching and discarding NOPs while halted,
                 // one M1 cycle (and one refresh bump) at a time.
                 c.cycles += 4;
-                cpu_mod.Cpu.bumpR(c);
+                c.bumpR();
                 return;
             }
             c.ei_delay = false;
@@ -65,7 +65,7 @@ pub fn Core(comptime Bus: type) type {
         pub fn interrupt(c: *Cpu, bus: *Bus, req: Interrupt) bool {
             if (req.nmi) {
                 c.halted = false;
-                cpu_mod.Cpu.bumpR(c);
+                c.bumpR();
                 push16(c, bus, c.pc);
                 c.wz = 0x0066;
                 c.pc = c.wz;
@@ -76,7 +76,7 @@ pub fn Core(comptime Bus: type) type {
             }
             if (req.int and c.iff1 and !c.ei_delay) {
                 c.halted = false;
-                cpu_mod.Cpu.bumpR(c);
+                c.bumpR();
                 c.iff1 = false;
                 c.iff2 = false;
                 c.q = false;
@@ -128,7 +128,7 @@ pub fn Core(comptime Bus: type) type {
         /// access that advances the refresh counter.
         fn fetchOpcode(c: *Cpu, bus: *Bus) u8 {
             c.cycles += 4;
-            cpu_mod.Cpu.bumpR(c);
+            c.bumpR();
             const v = bus.z80Read8(c.pc);
             c.pc +%= 1;
             return v;
@@ -535,7 +535,7 @@ pub fn Core(comptime Bus: type) type {
                     },
                     1 => { // EXX
                         swap(&c.b, &c.c, &c.bc_);
-                        swap16(&c.d, &c.e, &c.de_);
+                        swap(&c.d, &c.e, &c.de_);
                         const hl = c.hl();
                         c.setHl(c.hl_);
                         c.hl_ = hl;
@@ -635,9 +635,6 @@ pub fn Core(comptime Bus: type) type {
             lo.* = @truncate(shadow.*);
             shadow.* = v;
         }
-        fn swap16(hi: *u8, lo: *u8, shadow: *u16) void {
-            swap(hi, lo, shadow);
-        }
 
         // -------------------------------------------------------- CB/ED
 
@@ -685,35 +682,19 @@ pub fn Core(comptime Bus: type) type {
         fn execCBIndexed(c: *Cpu, bus: *Bus, addr: u16, code: u8) void {
             const f = decode.decompose(code);
             const idx: Reg8 = @enumFromInt(f.z);
-            switch (f.x) {
-                0 => {
-                    const op: decode.RotOp = @enumFromInt(f.y);
-                    const v = read8(c, bus, addr);
-                    c.cycles += 1;
-                    const z = rot(c, op, v);
-                    write8(c, bus, addr, z);
-                    if (idx != .hl_ind) setReg8(c, .none, idx, z);
-                },
-                1 => { // BIT y,(IX+d)/(IY+d): always reads once, no copy-back
-                    const v = read8(c, bus, addr);
-                    c.cycles += 1;
-                    flags.bit(c, @intCast(f.y), v, @truncate(c.wz >> 8));
-                },
-                2 => {
-                    const v = read8(c, bus, addr);
-                    c.cycles += 1;
-                    const z = v & ~(@as(u8, 1) << f.y);
-                    write8(c, bus, addr, z);
-                    if (idx != .hl_ind) setReg8(c, .none, idx, z);
-                },
-                3 => {
-                    const v = read8(c, bus, addr);
-                    c.cycles += 1;
-                    const z = v | (@as(u8, 1) << f.y);
-                    write8(c, bus, addr, z);
-                    if (idx != .hl_ind) setReg8(c, .none, idx, z);
-                },
+            const v = read8(c, bus, addr);
+            c.cycles += 1;
+            if (f.x == 1) { // BIT y,(IX+d)/(IY+d): reads only, no copy-back
+                flags.bit(c, @intCast(f.y), v, @truncate(c.wz >> 8));
+                return;
             }
+            const z = switch (f.x) {
+                0 => rot(c, @enumFromInt(f.y), v),
+                2 => v & ~(@as(u8, 1) << f.y), // RES y
+                else => v | (@as(u8, 1) << f.y), // SET y
+            };
+            write8(c, bus, addr, z);
+            if (idx != .hl_ind) setReg8(c, .none, idx, z);
         }
 
         fn execED(c: *Cpu, bus: *Bus, code: u8) void {
@@ -875,7 +856,7 @@ pub fn Core(comptime Bus: type) type {
         fn blockCp(c: *Cpu, bus: *Bus, dec_dir: bool) bool {
             const data = read8(c, bus, c.hl());
             c.cycles += 5;
-            c.wz +%= if (dec_dir) 0 -% @as(u16, 1) else 1;
+            c.wz = step16(c.wz, dec_dir);
             c.setHl(step16(c.hl(), dec_dir));
             c.setBc(c.bc() -% 1);
             const full: u16 = @as(u16, c.a) -% data;
@@ -895,12 +876,12 @@ pub fn Core(comptime Bus: type) type {
 
         fn blockIn(c: *Cpu, bus: *Bus, dec_dir: bool) bool {
             c.cycles += 1;
-            c.wz = c.bc() +% (if (dec_dir) 0 -% @as(u16, 1) else 1);
+            c.wz = step16(c.bc(), dec_dir);
             const data = ioIn(c, bus, c.bc());
             c.b -%= 1;
             write8(c, bus, c.hl(), data);
             c.setHl(step16(c.hl(), dec_dir));
-            blockIoFlags(c, data, c.c +% (if (dec_dir) @as(u8, 0xFF) else 1));
+            blockIoFlags(c, data, if (dec_dir) c.c -% 1 else c.c +% 1);
             return c.b != 0;
         }
 
@@ -910,7 +891,7 @@ pub fn Core(comptime Bus: type) type {
             c.b -%= 1;
             ioOut(c, bus, c.bc(), data);
             c.setHl(step16(c.hl(), dec_dir));
-            c.wz = c.bc() +% (if (dec_dir) 0 -% @as(u16, 1) else 1);
+            c.wz = step16(c.bc(), dec_dir);
             blockIoFlags(c, data, c.l);
             return c.b != 0;
         }
