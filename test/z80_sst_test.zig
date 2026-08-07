@@ -65,19 +65,45 @@ const TestCase = struct {
 
 /// Flat 64 KiB memory plus the single I/O access (at most one per
 /// instruction, on this decode table) that IN/OUT/block-IO opcodes make.
+/// Written addresses are remembered so `reset` can undo just those between
+/// cases instead of re-zeroing all 64 KiB ~1.6M times (same fix as z68k).
 const TrackedBus = struct {
     mem: [ram_bytes]u8 = undefined,
     /// Fed to the next `z80In` call; set from the case's recorded read.
     io_return: u8 = 0,
     io_access: ?IoAccess = null,
+    dirty: [64]u16 = undefined,
+    dirty_len: usize = 0,
 
     const IoAccess = struct { port: u16, data: u8, write: bool };
+
+    fn poke(b: *TrackedBus, addr: u16, v: u8) void {
+        b.mem[addr] = v;
+        if (b.dirty_len < b.dirty.len) {
+            b.dirty[b.dirty_len] = addr;
+            b.dirty_len += 1;
+        }
+    }
+
+    /// Undo everything the previous case touched. A full overflow of `dirty`
+    /// (can't happen with one instruction plus a case's initial ram, but
+    /// correctness shouldn't depend on that) falls back to the full clear.
+    fn reset(b: *TrackedBus) void {
+        if (b.dirty_len == b.dirty.len) {
+            @memset(&b.mem, 0);
+        } else {
+            for (b.dirty[0..b.dirty_len]) |a| b.mem[a] = 0;
+        }
+        b.dirty_len = 0;
+        b.io_access = null;
+        b.io_return = 0;
+    }
 
     pub fn z80Read8(b: *TrackedBus, addr: u16) u8 {
         return b.mem[addr];
     }
     pub fn z80Write8(b: *TrackedBus, addr: u16, v: u8) void {
-        b.mem[addr] = v;
+        b.poke(addr, v);
     }
     pub fn z80In(b: *TrackedBus, port: u16) u8 {
         b.io_access = .{ .port = port, .data = b.io_return, .write = false };
@@ -118,7 +144,7 @@ fn load(s: *const State, bus: *TrackedBus) Cpu {
     c.iff2 = s.iff2 != 0;
     c.q = s.q != 0;
     c.ei_delay = s.ei != 0;
-    for (s.ram) |w| bus.mem[w[0]] = @truncate(w[1]);
+    for (s.ram) |w| bus.poke(w[0], @truncate(w[1]));
     return c;
 }
 
@@ -261,12 +287,11 @@ fn runFile(gpa: std.mem.Allocator, src: []const u8, name: []const u8) !Tally {
 
     var tally = Tally{};
     var rep = Reporter{ .file = name };
-    var bus: TrackedBus = undefined;
+    var bus = TrackedBus{};
+    @memset(&bus.mem, 0); // once per file; per-case cleanup is bus.reset()
 
     for (cases) |tc| {
-        @memset(&bus.mem, 0);
-        bus.io_access = null;
-        bus.io_return = 0;
+        bus.reset();
         if (tc.ports) |ps| for (ps) |p| {
             if (p[2].len > 0 and p[2][0] == 'r') bus.io_return = p[1];
         };
@@ -355,8 +380,22 @@ pub fn main(init: std.process.Init) !void {
 
 // -------------------------------------------------------------------- tests
 
+test "reset undoes dirtied bytes, full clear on tracker overflow" {
+    var bus = TrackedBus{};
+    @memset(&bus.mem, 0);
+    bus.poke(0x10, 0xAA);
+    bus.reset();
+    try std.testing.expectEqual(@as(u8, 0), bus.mem[0x10]);
+    try std.testing.expectEqual(@as(usize, 0), bus.dirty_len);
+
+    for (0..bus.dirty.len) |i| bus.poke(@intCast(i), 1);
+    bus.poke(0x2000, 1); // overflows the tracker: reset must still clear it
+    bus.reset();
+    try std.testing.expectEqual(@as(u8, 0), bus.mem[0x2000]);
+}
+
 test "load maps the ei/q nonzero convention and skips p" {
-    var bus: TrackedBus = undefined;
+    var bus = TrackedBus{};
     @memset(&bus.mem, 0);
     const s = State{
         .pc = 0,
@@ -394,7 +433,7 @@ test "load maps the ei/q nonzero convention and skips p" {
 }
 
 test "compare reports the first mismatching field" {
-    var bus: TrackedBus = undefined;
+    var bus = TrackedBus{};
     @memset(&bus.mem, 0);
     var s = State{
         .pc = 0,
