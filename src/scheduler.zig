@@ -18,10 +18,11 @@ const Z80Core = genesis.Z80Core;
 const mclk_per_cpu = genesis.mclk_per_cpu;
 const mclk_per_z80 = genesis.mclk_per_z80;
 const mclk_per_line = genesis.mclk_per_line;
+const mclk_per_psg = genesis.mclk_per_psg;
 const lines_per_frame = genesis.lines_per_frame;
 
 /// The 68000's effective clock, derived from the master clock and its divider.
-pub const cpu_hz = 53_693_175.0 / @as(f64, mclk_per_cpu);
+pub const cpu_hz = @as(f64, genesis.master_clock_hz) / @as(f64, mclk_per_cpu);
 
 const vint_level: u3 = 6;
 const hint_level: u3 = 4;
@@ -30,6 +31,7 @@ pub fn runFrame(g: *Genesis, c: *Cpu) void {
     g.line = 0;
     while (g.line < lines_per_frame) : (g.line += 1) {
         runZ80Line(g);
+        runPsgLine(g);
 
         // The H-int counter reloads throughout blanking and counts down
         // once per line over the active display.
@@ -74,6 +76,21 @@ fn runZ80Line(g: *Genesis) void {
         if (g.z80_trace) traceZ80(g);
         Z80Core.step(&g.z, g);
     }
+}
+
+/// The PSG's share of a line's master clock, resampled straight into the
+/// mixer. Its clock is never gated the way the Z80's is: the chip sits on
+/// the VDP die and runs off the system clock whatever the Z80 is doing.
+///
+/// ponytail: register writes land at line granularity, so the PSG hears a
+/// line's worth of them at once (~64 us). Split the line at the write if a
+/// game's volume-pulsed PCM ever needs finer resolution.
+fn runPsgLine(g: *Genesis) void {
+    g.pclk_debt += mclk_per_line;
+    const budget = g.pclk_debt / mclk_per_psg;
+    g.pclk_debt %= mclk_per_psg;
+
+    for (0..budget) |_| g.audio.pushNative(g.p.step(), genesis.psg_rate);
 }
 
 fn traceZ80(g: *Genesis) void {
@@ -147,6 +164,33 @@ test "mclk_debt carries the sub-cycle remainder so a frame's clock does not drif
 
     runFrame(&g, &c);
     try testing.expectEqual(@as(u64, (2 * mclk_per_frame) % mclk_per_cpu), g.mclk_debt);
+}
+
+test "pclk_debt carries its remainder, and the PSG runs whatever the Z80 does" {
+    var c = Cpu{};
+    var g = spinGenesis(&c);
+    g.z80_busreq = true; // Z80 held off the bus for the whole frame
+
+    const mclk_per_frame = mclk_per_line * lines_per_frame;
+
+    runFrame(&g, &c);
+    try testing.expectEqual(@as(u64, mclk_per_frame % mclk_per_psg), g.pclk_debt);
+    try testing.expect(g.audio.len > 0);
+
+    runFrame(&g, &c);
+    try testing.expectEqual(@as(u64, (2 * mclk_per_frame) % mclk_per_psg), g.pclk_debt);
+}
+
+test "a frame of emulated time produces a frame's worth of 48 kHz samples" {
+    var c = Cpu{};
+    var g = spinGenesis(&c);
+
+    runFrame(&g, &c);
+
+    // 262 lines of 3420 mclk is one NTSC frame, ~1/59.92 s, so ~800 samples.
+    const ticks = @as(u64, mclk_per_line) * lines_per_frame / mclk_per_psg;
+    const expected = ticks * genesis.psg_rate.out / genesis.psg_rate.in;
+    try testing.expectEqual(expected, g.audio.len);
 }
 
 test "runFrame raises VBlank once per frame and leaves it pending until the CPU takes it" {

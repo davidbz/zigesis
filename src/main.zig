@@ -3,10 +3,11 @@
 //!     zig build run -Doptimize=ReleaseFast -- path/to/rom.bin
 //!     zig build run -- --shot 600 shot.png              # headless: N frames, then a PNG
 //!     zig build run -- --trace-z80                      # Z80 instruction trace to stderr
+//!     zig build run -- --volume 50                      # 0-100, default 100
 //!
-//! Owns raylib: window, texture upload, input polling, and the headless
-//! --shot path. Everything under `genesis`, `scheduler` and `vdp` is plain
-//! data and functions with no knowledge of any of this.
+//! Owns raylib: window, texture upload, the audio stream, input polling, and
+//! the headless --shot path. Everything under `genesis`, `scheduler`, `vdp`
+//! and `audio` is plain data and functions with no knowledge of any of this.
 //!
 //! Keys: arrows, A/S/D = A/B/C, Enter = Start.
 
@@ -14,6 +15,7 @@ const std = @import("std");
 const genesis = @import("genesis");
 const scheduler = @import("scheduler");
 const vdp = @import("vdp");
+const audio = @import("audio");
 
 const rl = @cImport(@cInclude("raylib.h"));
 
@@ -22,6 +24,18 @@ const Cpu = genesis.Cpu;
 const Core = genesis.Core;
 
 const scale = 3;
+
+const audio_sample_size = 16; // s16
+const audio_channels = 2;
+/// raylib zero-pads a short `UpdateAudioStream`, so a sub-buffer is refilled
+/// all at once or not at all. ~43 ms is small enough to keep latency sane and
+/// comfortably above any device period size raylib would round it up to.
+const audio_chunk_frames = 2048;
+/// Frame pacing target: enough queued audio to ride out a slow frame without
+/// underrunning, little enough that input still feels attached. This fill
+/// level is the clock the emulator runs on (DESIGN.md §6.2) — surplus means
+/// sleep, deficit means run flat out.
+const audio_target_frames = 2 * audio_chunk_frames;
 
 fn pollInput(g: *Genesis) void {
     var b: u8 = 0;
@@ -36,6 +50,27 @@ fn pollInput(g: *Genesis) void {
     g.buttons = b;
 }
 
+/// Hands raylib a full sub-buffer whenever it has one free and the mixer has
+/// one ready. Polling like this is the pattern raylib's own audio-stream
+/// example uses, so there is no callback thread to synchronize with.
+fn drainAudio(g: *Genesis, stream: rl.AudioStream) void {
+    while (g.audio.len >= audio_chunk_frames and rl.IsAudioStreamProcessed(stream)) {
+        var pcm: [audio_chunk_frames]audio.Frame = undefined;
+        for (&pcm) |*frame| frame.* = g.audio.pop().?;
+        rl.UpdateAudioStream(stream, &pcm, pcm.len);
+    }
+}
+
+/// Sleeps off the surplus once the mixer is further ahead of playback than
+/// the target; being behind returns immediately, so the emulator catches up
+/// on its own without ever needing to skip a frame.
+fn paceToAudio(g: *Genesis, io: std.Io) void {
+    if (g.audio.len <= audio_target_frames) return;
+
+    const surplus_ms = (g.audio.len - audio_target_frames) * std.time.ms_per_s / audio.sample_rate;
+    io.sleep(.fromMilliseconds(@intCast(surplus_ms)), .awake) catch {};
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -47,17 +82,20 @@ pub fn main(init: std.process.Init) !void {
     var shot_frames: ?u32 = null;
     var shot_path: [:0]const u8 = "shot.png";
     var trace_z80 = false;
+    var volume_pct: u8 = 100;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--shot")) {
             shot_frames = try std.fmt.parseInt(u32, args.next() orelse "60", 10);
             if (args.next()) |p| shot_path = p;
         } else if (std.mem.eql(u8, arg, "--trace-z80")) {
             trace_z80 = true;
+        } else if (std.mem.eql(u8, arg, "--volume")) {
+            volume_pct = @min(100, try std.fmt.parseInt(u8, args.next() orelse "100", 10));
         } else path = arg;
     }
 
     const rom_path = path orelse {
-        std.debug.print("usage: zigesis <rom> [--shot N [out.png]] [--trace-z80]\n", .{});
+        std.debug.print("usage: zigesis <rom> [--shot N [out.png]] [--trace-z80] [--volume 0-100]\n", .{});
         return error.NoRomGiven;
     };
     const image = std.Io.Dir.cwd().readFileAlloc(io, rom_path, gpa, .limited(8 << 20)) catch |err| {
@@ -71,6 +109,7 @@ pub fn main(init: std.process.Init) !void {
     const g = try gpa.create(Genesis);
     defer gpa.destroy(g);
     g.* = .{ .rom = image, .cpu = &c, .z80_trace = trace_z80 };
+    g.audio.volume_pct = volume_pct;
 
     Core.reset(&c, g);
     std.debug.print("{s}: {d} KiB, reset pc={x:0>6} sp={x:0>8}\n", .{
@@ -96,7 +135,6 @@ pub fn main(init: std.process.Init) !void {
             return error.NoDisplay;
         }
         defer rl.CloseWindow();
-        rl.SetTargetFPS(60);
         const tex = rl.LoadTextureFromImage(.{
             .data = &g.v.fb,
             .width = vdp.width,
@@ -104,6 +142,16 @@ pub fn main(init: std.process.Init) !void {
             .mipmaps = 1,
             .format = rl.PIXELFORMAT_UNCOMPRESSED_R8G8B8A8,
         });
+
+        // The stream, not the vsync, paces the loop from here on: no
+        // SetTargetFPS, just `paceToAudio` below.
+        rl.InitAudioDevice();
+        defer rl.CloseAudioDevice();
+        rl.SetAudioStreamBufferSizeDefault(audio_chunk_frames);
+        const stream = rl.LoadAudioStream(audio.sample_rate, audio_sample_size, audio_channels);
+        defer rl.UnloadAudioStream(stream);
+        rl.PlayAudioStream(stream);
+
         while (!rl.WindowShouldClose() and !c.halted) : (frames += 1) {
             pollInput(g);
             scheduler.runFrame(g, &c);
@@ -118,6 +166,8 @@ pub fn main(init: std.process.Init) !void {
                 .{ .r = 255, .g = 255, .b = 255, .a = 255 },
             );
             rl.EndDrawing();
+            drainAudio(g, stream);
+            paceToAudio(g, io);
         }
     }
 

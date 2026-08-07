@@ -3,30 +3,46 @@
 //! the CPUs and VDP. Frame timing and interrupt delivery live in
 //! `scheduler.zig`; this file only answers bus reads and writes.
 //!
-//! The YM2612 and PSG are stubs: present enough in the memory map that a
-//! ROM's handshakes complete, but nothing synthesizes yet (M2/M3 in
-//! DESIGN.md). The Z80 itself runs for real, with its own memory map,
-//! BUSREQ/RESET handshake, and banked window onto this same 68k bus.
+//! The PSG runs for real (`psg.zig`, stepped by `scheduler.zig` into the
+//! `audio` mixer this struct owns). The YM2612 is still a stub: present
+//! enough in the memory map that a ROM's handshakes complete, but nothing
+//! synthesizes yet (M3 in DESIGN.md). The Z80 runs for real too, with its
+//! own memory map, BUSREQ/RESET handshake, and banked window onto this same
+//! 68k bus.
 
 const std = @import("std");
 const m68k = @import("m68k");
 const z80 = @import("z80");
 const vdp = @import("vdp");
+const psg = @import("psg");
+const audio = @import("audio");
 
 pub const Cpu = m68k.Cpu;
 pub const Core = m68k.Core(Genesis);
 pub const Z80Cpu = z80.Cpu;
 pub const Z80Core = z80.Core(Genesis);
+pub const Psg = psg.Psg;
+pub const Mixer = audio.Mixer;
 
 // NTSC: a 53.693175 MHz master clock, seven of which make a 68000 cycle, 15
 // of which make a Z80 cycle, and 3420 of which make a scanline.
 // `scheduler.zig` drives the frame loop off these; `hvCounter` below needs
 // them too, so they live with the rest of the machine's hardware constants
 // rather than with the loop that steps it.
+pub const master_clock_hz = 53_693_175;
 pub const mclk_per_cpu = 7;
 pub const mclk_per_z80 = 15;
 pub const mclk_per_line = 3420;
 pub const lines_per_frame = 262;
+
+/// The PSG steps once per 16 Z80 clocks (DESIGN.md §3.3), so mclk/240, or
+/// about 223.7 kHz — not a whole number of hertz, which is why the ratio
+/// down to 48 kHz is carried as an exact fraction rather than a rate.
+pub const mclk_per_psg = mclk_per_z80 * 16;
+pub const psg_rate = audio.Rate{
+    .out = audio.sample_rate * mclk_per_psg,
+    .in = master_clock_hz,
+};
 
 const ram_bytes = 64 << 10;
 const zram_bytes = 8 << 10;
@@ -35,6 +51,14 @@ const zram_mask = zram_bytes - 1;
 
 /// The controller's TH pin, bit 6 of both the data and control port bytes.
 const th_bit: u8 = 0x40;
+
+/// The PSG's write-only port, $C00011, and the rest of the VDP block it
+/// decodes over.
+const psg_port_lo: u24 = 0xC0_0010;
+const psg_port_hi: u24 = 0xC0_001F;
+/// The Z80's 32-byte window onto the VDP block at $C00000, which is how a
+/// sound driver reaches the PSG without asking the 68k for the bus.
+const z80_vdp_mask: u24 = 0x1F;
 
 // Controller bits, active high here and inverted on the way out to the ROM.
 pub const btn_up: u8 = 0x01;
@@ -52,6 +76,9 @@ pub const Genesis = struct {
     ram: [ram_bytes]u8 = @splat(0),
     zram: [zram_bytes]u8 = @splat(0),
     v: vdp.Vdp = .{},
+
+    p: Psg = .{},
+    audio: Mixer = .{},
 
     z: Z80Cpu = .{},
     /// Held true by hardware at power-on; the 68k must write $A11200 to
@@ -86,6 +113,9 @@ pub const Genesis = struct {
     /// while the Z80 is actually free to run (see `scheduler.runZ80Line`):
     /// real hardware doesn't bank cycles while the chip is held.
     zclk_debt: u64 = 0,
+    /// And again for the PSG's /240. This one is never gated: the chip is on
+    /// the VDP die and keeps running whatever the Z80 is doing.
+    pclk_debt: u64 = 0,
 
     // -------------------------------------------------------------- memory map
 
@@ -127,6 +157,9 @@ pub const Genesis = struct {
             // A byte write to a VDP port still presents a full word, with the
             // byte in both halves.
             0xC0_0000...0xC0_000F => g.write16(addr & ~@as(u24, 1), @as(u16, val) << 8 | val),
+            // The PSG hangs off the low byte of the bus only, so it hears
+            // $C00011 and ignores the even address beside it.
+            psg_port_lo...psg_port_hi => if (addr & 1 != 0) g.p.write(val),
             0xE0_0000...0xFF_FFFF => g.ram[addr & ram_mask] = val,
             else => {},
         }
@@ -140,6 +173,12 @@ pub const Genesis = struct {
                 g.v.writeControl(val);
                 if (g.v.dma_request) g.dmaFrom68k();
             },
+            // The H/V counter is read-only, and swallowing the write here
+            // keeps it out of the `else` arm, which would bounce it back and
+            // forth with `write8` forever.
+            0xC0_0008...0xC0_000F => {},
+            // Word writes reach the PSG too, and it still only sees D0-D7.
+            psg_port_lo...psg_port_hi => g.p.write(@truncate(val)),
             0xE0_0000...0xFF_FFFF => wr16(&g.ram, addr & ram_mask, val),
             else => g.write8(addr, @truncate(val >> 8)),
         }
@@ -217,7 +256,7 @@ pub const Genesis = struct {
         return switch (addr) {
             0x0000...0x3FFF => g.zram[addr & zram_mask],
             0x4000...0x5FFF => 0, // YM2612: never busy
-            0x7F00...0x7FFF => g.read8(0xC0_0000 | @as(u24, addr & 0x0F)),
+            0x7F00...0x7FFF => g.read8(@as(u24, addr) & z80_vdp_mask | 0xC0_0000),
             0x8000...0xFFFF => g.read8(g.z80BankAddr(addr)),
             else => 0xFF,
         };
@@ -228,9 +267,9 @@ pub const Genesis = struct {
             0x0000...0x3FFF => g.zram[addr & zram_mask] = val,
             // Loaded LSB-first: each write shifts the new bit into bit 8.
             0x6000...0x60FF => g.z80_bank = (g.z80_bank >> 1) | (@as(u9, val & 1) << 8),
-            0x7F00...0x7FFF => g.write8(0xC0_0000 | @as(u24, addr & 0x0F), val),
+            0x7F00...0x7FFF => g.write8(@as(u24, addr) & z80_vdp_mask | 0xC0_0000, val),
             0x8000...0xFFFF => g.write8(g.z80BankAddr(addr), val),
-            else => {}, // YM2612/PSG: writes accepted, nothing to synthesize yet
+            else => {}, // YM2612: writes accepted, nothing to synthesize yet
         }
     }
 
@@ -350,6 +389,35 @@ test "Z80's VDP window lands on the same VRAM the 68k writes" {
     g.z80Write8(0x7F00, 0xAB); // data port: a byte write doubles into the word
 
     try testing.expectEqual(@as(u8, 0xAB), g.v.vram[0xC000]);
+}
+
+test "the PSG hears $C00011 and the Z80's $7F11 window, but not the byte beside them" {
+    var c = Cpu{};
+    var g = Genesis{ .rom = &.{}, .cpu = &c };
+    const silent: u4 = 15;
+
+    // Latch bytes selecting a volume register: $80 | channel << 5 | 1 << 4.
+    g.write8(0xC0_0011, 0x80 | (0 << 5) | (1 << 4) | 0x03);
+    try testing.expectEqual(@as(u4, 3), g.p.atten[0]);
+
+    g.z80Write8(0x7F11, 0x80 | (1 << 5) | (1 << 4) | 0x05);
+    try testing.expectEqual(@as(u4, 5), g.p.atten[1]);
+
+    // A word write presents the same low byte the chip is wired to...
+    g.write16(0xC0_0010, 0x80 | (2 << 5) | (1 << 4) | 0x07);
+    try testing.expectEqual(@as(u4, 7), g.p.atten[2]);
+
+    // ...but a byte write to the even address is on D8-D15, which is not.
+    g.write8(0xC0_0010, 0x80 | (3 << 5) | (1 << 4) | 0x09);
+    try testing.expectEqual(silent, g.p.atten[3]);
+}
+
+test "a word write to the read-only H/V counter is swallowed, not bounced" {
+    var c = Cpu{};
+    var g = Genesis{ .rom = &.{}, .cpu = &c };
+
+    g.write16(0xC0_0008, 0xBEEF);
+    try testing.expectEqual(@as(u16, 0), g.hvCounter());
 }
 
 test "version register reports export, NTSC, no expansion" {

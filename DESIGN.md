@@ -45,8 +45,8 @@ From `examples/genesis_vdp.zig` (VDP 315-5313):
 Deliberately stubbed in the PoC, i.e. the actual work of this project:
 
 - YM2612 FM synthesizer (reads as never-busy).
-- SN76489 PSG.
-- Audio output of any kind.
+- SN76489 PSG (done in M2).
+- Audio output of any kind (done in M2).
 - VDP: shadow/highlight, interlace, H32 mode (256px), per-line sprite/pixel
   limits, sprite masking, PAL (V30/240-line) timing.
 - Save states, SRAM cartridge saves, mappers, options UI, key configuration.
@@ -369,7 +369,7 @@ releasing the Z80 doesn't burst-execute a backlog it never had. `--trace-z80`
 prints a `[frame line cycle]`-prefixed PC/opcode/register line per Z80
 instruction to stderr.
 
-### M2: PSG and the audio pipeline
+### M2: PSG and the audio pipeline — done
 
 Deliverables: SN76489 core; mixing/resampling/ring-buffer pipeline;
 raylib AudioStream output; audio-driven frame pacing; volume option.
@@ -377,6 +377,39 @@ Acceptance: PSG-only audio (SFX in many games, full music in some) plays
 clean and pitch-correct; emulator speed locks to audio without drift over
 a 10-minute headless run; a pinned-hash audio regression test (hash of N
 resampled samples for a scripted input log) passes.
+
+`src/psg.zig` is a from-scratch SN76489: three tone channels plus noise,
+white and periodic LFSR modes, noise clocked either off a fixed divider or
+off tone channel 2, the tone-period-0 DC quirk games use for sample
+playback, and a comptime 2 dB attenuation table. Tone frequency comes out
+as clock/(32 × period) by construction, which is the divider trap §7 warns
+about.
+
+`src/audio.zig` owns a fixed-size `Mixer`: a boxcar decimator into a
+fixed-size ring buffer, no allocation and no raylib import. The rate
+conversion is an exact integer fraction (48000 × 240 output ticks per
+53693175 master clocks) with its remainder carried across calls like
+`mclk_debt`, so a run of any length emits exactly the right sample count
+and resamples to the same bytes on every machine. Averaging the native
+samples an output sample covers costs one add and doubles as the low-pass
+that a 4.66:1 rate drop needs; §6.2 asks only for linear interpolation.
+
+`scheduler.zig` steps the PSG once per line at mclk/240 with its own
+carried `pclk_debt`, ungated by Z80 BUSREQ/RESET — the chip is on the VDP
+die and runs off the system clock whatever the Z80 is doing. Register
+writes therefore land at line granularity (~64 µs); split the line at the
+write if a game's volume-pulsed PCM ever needs finer resolution.
+
+`main.zig` is the only consumer of raylib's `AudioStream`: it polls
+`IsAudioStreamProcessed`, hands over a whole sub-buffer at a time (raylib
+zero-pads a short update), and paces the frame loop off the ring's fill
+level instead of `SetTargetFPS` — surplus means sleep, deficit means run
+flat out. `--volume N` (0-100) scales samples in the mixer.
+
+Wiring the PSG up also fixed a live bug: the Z80's window at $7F00-$7FFF
+was masked to $C00000-$C0000F, so a sound driver's PSG writes at $7F11
+landed on the VDP data port and corrupted CRAM. The window is 32 bytes
+wide, and the pinned frame hashes moved with the fix.
 
 ### M3: YM2612
 

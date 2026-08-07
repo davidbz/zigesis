@@ -20,8 +20,13 @@ for the full plan and acceptance criteria):
 - **M1 — Z80 core and bus integration: done.** A from-scratch Z80 core,
   exact on the full SingleStepTests/z80 conformance corpus, wired into the
   machine with real BUSREQ/RESET semantics and the banked 68k-bus window.
-- **M2 and later** (PSG, YM2612, save states, debug tooling, compatibility
-  pass) are not started. No audio is audible yet.
+- **M2 — PSG and the audio pipeline: done.** A from-scratch SN76489 core, a
+  resampling mixer and ring buffer with no allocation and no raylib import,
+  and a raylib `AudioStream` frontend paced by the ring's fill level rather
+  than a fixed target FPS. PSG sound effects and percussion are audible; FM
+  music waits on M3.
+- **M3 and later** (YM2612, VDP completion, save states, debug tooling,
+  compatibility pass) are not started.
 
 ## Requirements
 
@@ -55,6 +60,7 @@ copy.
 zig build run -Doptimize=ReleaseFast -- path/to/rom.bin
 zig build run -- rom.bin --shot 600 shot.png   # headless: run N frames, write a PNG
 zig build run -- rom.bin --trace-z80           # Z80 instruction trace to stderr
+zig build run -- rom.bin --volume 50           # 0-100, default 100
 ```
 
 Controls: arrow keys for the d-pad, A/S/D for buttons A/B/C, Enter for
@@ -66,13 +72,13 @@ Start.
 zig build test
 ```
 
-Runs, per module: VDP, Z80, `genesis` (memory map and bus), and `scheduler`
-(timing and interrupts) unit tests, plus two small Z80 conformance-harness
-unit tests. It also runs the headless frame-hash regression suite
+Runs, per module: VDP, Z80, PSG, audio mixer, `genesis` (memory map and
+bus), and `scheduler` (timing and interrupts) unit tests, plus two small Z80
+conformance-harness unit tests. It also runs the headless regression suite
 (`test/system_test.zig`), which boots
 [Cave Story MD](https://github.com/andwn/cave-story-md) — a freely
-distributable open-source homebrew — and checks the framebuffer against
-pinned hashes at a few fixed frames. Fetch the ROM once with
+distributable open-source homebrew — and checks the framebuffer and the
+resampled PSG output against pinned hashes. Fetch the ROM once with
 `tools/fetch_test_roms.sh` (pinned to a release tag, into the gitignored
 `roms/`); the test skips cleanly when it is absent.
 
@@ -95,10 +101,10 @@ large to fetch in ordinary CI runs.
 
 Single-threaded and master-clock driven: the 53.693175 MHz NTSC master
 clock is the only time base, and every chip's rate is a named integer
-divider of it (68000 at mclk/7, Z80 at mclk/15). `scheduler.zig` steps both
-CPUs a scanline's worth of cycles at a time, carrying the sub-cycle
-remainder so a frame's timing does not drift. Full detail in `DESIGN.md`
-section 3.3.
+divider of it (68000 at mclk/7, Z80 at mclk/15, PSG at mclk/240).
+`scheduler.zig` steps both CPUs and the PSG a scanline's worth of cycles at
+a time, carrying each one's sub-cycle remainder so timing does not drift.
+Full detail in `DESIGN.md` section 3.3.
 
 The codebase follows a data-oriented design: every chip is a flat,
 fixed-size struct plus free functions, with no allocation in the per-frame
@@ -113,6 +119,8 @@ src/
   genesis.zig         machine state and bus: memory map, arbitration, BUSREQ/RESET
   scheduler.zig       master-clock accounting, per-scanline stepping, interrupts
   vdp.zig             video display processor (315-5313)
+  psg.zig             SN76489 PSG: tone and noise channels, attenuation
+  audio.zig           mixing, resampling, the ring buffer that feeds raylib
   z80/
     cpu.zig           architectural state: registers, flags, interrupt latches
     decode.zig        opcode field decomposition, register tables
@@ -120,7 +128,7 @@ src/
     core.zig          fetch/decode/execute; Core(comptime Bus), same shape as z68k
     root.zig          barrel module
 test/
-  system_test.zig     headless frame-hash regression suite
+  system_test.zig     headless frame-hash and audio-hash regression suite
   z80_sst_test.zig    SingleStepTests/z80 conformance runner
 tools/
   fetch_test_roms.sh  fetches the free test ROM for the regression suite into roms/
@@ -145,10 +153,13 @@ CPU and machine:
 - [SingleStepTests](https://github.com/SingleStepTests) — the m68000 and
   z80 conformance suites both CPU cores are validated against.
 
-Audio (for milestones M2 and M3, not yet implemented):
+Audio:
 
+- [SMS Power](https://www.smspower.org/Development/SN76489) — the SN76489
+  reference the PSG core is written from: register format, LFSR taps, and
+  the tone-period-0 behaviour.
 - [Nuked-OPN2](https://github.com/nukeykt/Nuked-OPN2) — die-shot-accurate
-  YM2612/YM3438 core, the ground truth for FM synthesis validation.
+  YM2612/YM3438 core, the ground truth for FM synthesis validation in M3.
 - [ymfm](https://github.com/aaronsgiles/ymfm) — a clean modern FM core
   family.
 
