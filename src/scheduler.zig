@@ -13,8 +13,10 @@ const genesis = @import("genesis");
 const Genesis = genesis.Genesis;
 const Cpu = genesis.Cpu;
 const Core = genesis.Core;
+const Z80Core = genesis.Z80Core;
 
 const mclk_per_cpu = genesis.mclk_per_cpu;
+const mclk_per_z80 = genesis.mclk_per_z80;
 const mclk_per_line = genesis.mclk_per_line;
 const lines_per_frame = genesis.lines_per_frame;
 
@@ -27,6 +29,8 @@ const hint_level: u3 = 4;
 pub fn runFrame(g: *Genesis, c: *Cpu) void {
     g.line = 0;
     while (g.line < lines_per_frame) : (g.line += 1) {
+        runZ80Line(g);
+
         // The H-int counter reloads throughout blanking and counts down
         // once per line over the active display.
         if (g.line <= vdp.height) {
@@ -47,9 +51,36 @@ pub fn runFrame(g: *Genesis, c: *Cpu) void {
             g.v.in_vblank = true;
             g.v.vint_flag = true;
             g.v.vint_irq = true;
+            g.z80_int_pending = true;
         }
         if (g.line == lines_per_frame - 1) g.v.in_vblank = false;
     }
+    g.frame +%= 1;
+}
+
+/// The Z80's share of a line's master clock, run only while it's free (not
+/// held in reset or busreq): held time earns no debt, so releasing it
+/// doesn't burst-execute a backlog of cycles it never really had.
+fn runZ80Line(g: *Genesis) void {
+    if (g.z80_reset or g.z80_busreq) return;
+
+    g.zclk_debt += mclk_per_line;
+    const budget = g.zclk_debt / mclk_per_z80;
+    g.zclk_debt %= mclk_per_z80;
+
+    const end = g.z.cycles + budget;
+    while (g.z.cycles < end) {
+        if (g.z80_int_pending and Z80Core.interrupt(&g.z, g, .{ .int = true })) g.z80_int_pending = false;
+        if (g.z80_trace) traceZ80(g);
+        Z80Core.step(&g.z, g);
+    }
+}
+
+fn traceZ80(g: *Genesis) void {
+    std.debug.print("[f{d} l{d} t{d}] z80 pc={x:0>4} op={x:0>2} af={x:0>4} bc={x:0>4} de={x:0>4} hl={x:0>4} sp={x:0>4}\n", .{
+        g.frame,  g.line,   g.z.cycles, g.z.pc,   g.z80Read8(g.z.pc),
+        g.z.af(), g.z.bc(), g.z.de(),   g.z.hl(), g.z.sp,
+    });
 }
 
 fn runLine(g: *Genesis, c: *Cpu, budget: u64) void {

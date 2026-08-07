@@ -14,6 +14,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const z80 = b.addModule("z80", .{
+        .root_source_file = b.path("src/z80/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const genesis = b.addModule("genesis", .{
         .root_source_file = b.path("src/genesis.zig"),
         .target = target,
@@ -21,6 +26,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "m68k", .module = m68k },
             .{ .name = "vdp", .module = vdp },
+            .{ .name = "z80", .module = z80 },
         },
     });
     const scheduler = b.addModule("scheduler", .{
@@ -45,6 +51,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(vdp_tests).step);
     check_step.dependOn(&vdp_tests.step);
 
+    const z80_tests = b.addTest(.{ .root_module = z80 });
+    test_step.dependOn(&b.addRunArtifact(z80_tests).step);
+    check_step.dependOn(&z80_tests.step);
+
     const genesis_tests = b.addTest(.{ .root_module = genesis });
     test_step.dependOn(&b.addRunArtifact(genesis_tests).step);
     check_step.dependOn(&genesis_tests.step);
@@ -68,6 +78,27 @@ pub fn build(b: *std.Build) void {
     system_tests_run.setCwd(b.path(".")); // roms/ is resolved relative to the project
     test_step.dependOn(&system_tests_run.step);
     check_step.dependOn(&system_tests.step);
+
+    // --- Z80 SingleStepTests conformance harness ------------------------------
+    const z80_harness_mod = b.createModule(.{
+        .root_source_file = b.path("test/z80_sst_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "z80", .module = z80 }},
+    });
+    const z80_harness_tests = b.addTest(.{ .root_module = z80_harness_mod });
+    test_step.dependOn(&b.addRunArtifact(z80_harness_tests).step);
+    check_step.dependOn(&z80_harness_tests.step);
+
+    const z80_sst = b.addExecutable(.{ .name = "z80-sst", .root_module = z80_harness_mod });
+    b.installArtifact(z80_sst);
+
+    const z80_sst_run = b.addRunArtifact(z80_sst);
+    z80_sst_run.setCwd(b.path(".")); // testdata/ is resolved relative to the project
+    z80_sst_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| z80_sst_run.addArgs(args);
+    b.step("z80-sst", "Run the Z80 SingleStepTests conformance suite (needs testdata/z80/)")
+        .dependOn(&z80_sst_run.step);
 
     // --- the emulator ----------------------------------------------------------
     // raylib is a lazy dependency, but zgen always needs it: the call below

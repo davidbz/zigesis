@@ -1,29 +1,34 @@
 //! The Sega Genesis / Mega Drive machine: cartridge ROM, 64 KiB of work RAM,
 //! a controller, and the memory map and bus arbitration that ties them to
-//! the CPU and VDP. Frame timing and interrupt delivery live in
+//! the CPUs and VDP. Frame timing and interrupt delivery live in
 //! `scheduler.zig`; this file only answers bus reads and writes.
 //!
-//! The Z80, YM2612 and PSG are stubs: present enough in the memory map that
-//! a ROM's handshakes complete, but nothing executes or synthesizes yet
-//! (M1-M3 in DESIGN.md).
+//! The YM2612 and PSG are stubs: present enough in the memory map that a
+//! ROM's handshakes complete, but nothing synthesizes yet (M2/M3 in
+//! DESIGN.md). The Z80 itself runs for real, with its own memory map,
+//! BUSREQ/RESET handshake, and banked window onto this same 68k bus.
 
 const std = @import("std");
 const m68k = @import("m68k");
+const z80 = @import("z80");
 const vdp = @import("vdp");
 
 pub const Cpu = m68k.Cpu;
 pub const Core = m68k.Core(Genesis);
+pub const Z80Cpu = z80.Cpu;
+pub const Z80Core = z80.Core(Genesis);
 
-// NTSC: a 53.693175 MHz master clock, seven of which make a 68000 cycle, and
-// 3420 of which make a scanline. `scheduler.zig` drives the frame loop off
-// these; `hvCounter` below needs them too, so they live with the rest of the
-// machine's hardware constants rather than with the loop that steps it.
+// NTSC: a 53.693175 MHz master clock, seven of which make a 68000 cycle, 15
+// of which make a Z80 cycle, and 3420 of which make a scanline.
+// `scheduler.zig` drives the frame loop off these; `hvCounter` below needs
+// them too, so they live with the rest of the machine's hardware constants
+// rather than with the loop that steps it.
 pub const mclk_per_cpu = 7;
+pub const mclk_per_z80 = 15;
 pub const mclk_per_line = 3420;
 pub const lines_per_frame = 262;
 
 const ram_bytes = 64 << 10;
-/// The Z80's RAM. Nothing runs it yet; the 68k still fills it with a driver.
 const zram_bytes = 8 << 10;
 
 // Controller bits, active high here and inverted on the way out to the ROM.
@@ -43,16 +48,39 @@ pub const Genesis = struct {
     zram: [zram_bytes]u8 = @splat(0),
     v: vdp.Vdp = .{},
 
+    z: Z80Cpu = .{},
+    /// Held true by hardware at power-on; the 68k must write $A11200 to
+    /// release it before the Z80 fetches its first opcode.
+    z80_reset: bool = true,
+    /// True once the 68k has requested (and, in this instant-grant model,
+    /// been given) the Z80's bus.
+    z80_busreq: bool = false,
+    /// 9-bit bank register selecting which 32 KiB of the 68k address space
+    /// $8000-$FFFF of Z80 address space is a window onto. Loaded one bit at
+    /// a time, LSB first, by successive writes to $6000.
+    z80_bank: u9 = 0,
+    /// Set for one line at VBlank, cleared once `Core.interrupt` reports the
+    /// Z80 actually took it (mirrors real hardware's level-triggered IM1
+    /// line closely enough for M1: no cycle-exact pulse width yet).
+    z80_int_pending: bool = false,
+    /// Toggles per-instruction Z80 tracing to stderr; see `scheduler.zig`.
+    z80_trace: bool = false,
+
     buttons: u8 = 0,
     pad_ctrl: u8 = 0,
     pad_data: u8 = 0,
 
+    frame: u32 = 0,
     line: u32 = 0,
     /// Cycle count when the current scanline started, for the H counter.
     line_start: u64 = 0,
     /// A scanline isn't a whole number of CPU cycles; the remainder is carried
     /// here so a frame comes out at the right length instead of 0.1% short.
     mclk_debt: u64 = 0,
+    /// Same idea as `mclk_debt`, but for the Z80's /15 divider. Only accrues
+    /// while the Z80 is actually free to run (see `scheduler.runZ80Line`):
+    /// real hardware doesn't bank cycles while the chip is held.
+    zclk_debt: u64 = 0,
 
     // -------------------------------------------------------------- memory map
 
@@ -62,9 +90,9 @@ pub const Genesis = struct {
             0xA0_0000...0xA0_3FFF => g.zram[addr & 0x1FFF],
             0xA0_4000...0xA0_5FFF => 0, // YM2612: never busy
             0xA1_0000...0xA1_001F => g.ioRead(addr),
-            // Z80 bus request and reset. The bus is always granted at once:
-            // bit 0 low means the 68k has it.
-            0xA1_1100...0xA1_11FF => 0x00,
+            // Bit 0 low means the 68k has the bus; this model grants it the
+            // instant it's requested, so it only ever reads busreq back.
+            0xA1_1100...0xA1_11FF => if (g.z80_busreq) 0x00 else 0x01,
             0xC0_0000...0xC0_000F => @truncate(g.read16(addr & ~@as(u24, 1)) >> @intCast(8 * (~addr & 1))),
             0xE0_0000...0xFF_FFFF => g.ram[addr & 0xFFFF],
             else => 0xFF,
@@ -89,6 +117,8 @@ pub const Genesis = struct {
         switch (addr) {
             0xA0_0000...0xA0_3FFF => g.zram[addr & 0x1FFF] = val,
             0xA1_0000...0xA1_001F => g.ioWrite(addr, val),
+            0xA1_1100...0xA1_11FF => g.z80_busreq = val & 1 != 0,
+            0xA1_1200...0xA1_12FF => g.writeZ80Reset(val),
             // A byte write to a VDP port still presents a full word, with the
             // byte in both halves.
             0xC0_0000...0xC0_000F => g.write16(addr & ~@as(u24, 1), @as(u16, val) << 8 | val),
@@ -162,6 +192,55 @@ pub const Genesis = struct {
             (b & (btn_up | btn_down)) | ((b & btn_a) >> 2) | ((b & btn_start) >> 2);
         return (if (th) @as(u8, 0x40) else 0) | (~low & 0x3F);
     }
+
+    /// RESET pin semantics: while held (bit 0 clear), the Z80's registers
+    /// stay cleared, same as real silicon; releasing it just lets `step`
+    /// resume from wherever `Z80Core.reset` left PC (0).
+    fn writeZ80Reset(g: *Genesis, val: u8) void {
+        const held = val & 1 == 0;
+        if (held and !g.z80_reset) Z80Core.reset(&g.z);
+        g.z80_reset = held;
+    }
+
+    // ------------------------------------------------------------- Z80 bus
+
+    fn z80BankAddr(g: *Genesis, addr: u16) u24 {
+        return (@as(u24, g.z80_bank) << 15) | (addr & 0x7FFF);
+    }
+
+    pub fn z80Read8(g: *Genesis, addr: u16) u8 {
+        return switch (addr) {
+            0x0000...0x3FFF => g.zram[addr & 0x1FFF],
+            0x4000...0x5FFF => 0, // YM2612: never busy
+            0x7F00...0x7FFF => g.read8(0xC0_0000 | @as(u24, addr & 0x0F)),
+            0x8000...0xFFFF => g.read8(g.z80BankAddr(addr)),
+            else => 0xFF,
+        };
+    }
+
+    pub fn z80Write8(g: *Genesis, addr: u16, val: u8) void {
+        switch (addr) {
+            0x0000...0x3FFF => g.zram[addr & 0x1FFF] = val,
+            // Loaded LSB-first: each write shifts the new bit into bit 8.
+            0x6000...0x60FF => g.z80_bank = (g.z80_bank >> 1) | (@as(u9, val & 1) << 8),
+            0x7F00...0x7FFF => g.write8(0xC0_0000 | @as(u24, addr & 0x0F), val),
+            0x8000...0xFFFF => g.write8(g.z80BankAddr(addr), val),
+            else => {}, // YM2612/PSG: writes accepted, nothing to synthesize yet
+        }
+    }
+
+    /// Nothing on the Genesis is wired to the Z80's IORQ pins; every chip a
+    /// sound driver touches is memory-mapped instead.
+    pub fn z80In(g: *Genesis, port: u16) u8 {
+        _ = g;
+        _ = port;
+        return 0xFF;
+    }
+    pub fn z80Out(g: *Genesis, port: u16, val: u8) void {
+        _ = g;
+        _ = port;
+        _ = val;
+    }
 };
 
 fn rd16(mem: []const u8, addr: usize) u16 {
@@ -207,11 +286,65 @@ test "Z80 RAM mirrors every 8 KiB and the YM2612 always reads not-busy" {
     try testing.expectEqual(@as(u8, 0), g.read8(0xA04000));
 }
 
-test "Z80 bus request/reset region always reads granted" {
+test "Z80 bus request reads granted only after the 68k asks for it" {
     var c = Cpu{};
     var g = Genesis{ .rom = &.{}, .cpu = &c };
 
+    try testing.expectEqual(@as(u8, 0x01), g.read8(0xA11100));
+    g.write8(0xA11100, 0x01);
     try testing.expectEqual(@as(u8, 0x00), g.read8(0xA11100));
+    g.write8(0xA11100, 0x00);
+    try testing.expectEqual(@as(u8, 0x01), g.read8(0xA11100));
+}
+
+test "Z80 reset clears architectural state and holds it there until released" {
+    var c = Cpu{};
+    var g = Genesis{ .rom = &.{}, .cpu = &c };
+    g.z80_reset = false;
+    g.z.pc = 0x1234;
+    g.z.iff1 = true;
+
+    g.write8(0xA11200, 0x00); // assert reset
+    try testing.expect(g.z80_reset);
+    try testing.expectEqual(@as(u16, 0), g.z.pc);
+    try testing.expect(!g.z.iff1);
+
+    g.write8(0xA11200, 0x01); // release
+    try testing.expect(!g.z80_reset);
+}
+
+test "Z80 bank register shifts in LSB-first and windows the 68k bus" {
+    var c = Cpu{};
+    const rom = [_]u8{0xAB} ** 0x9000;
+    var g = Genesis{ .rom = &rom, .cpu = &c };
+
+    // Selects bank 1 (bit 8 set): write nine bits, a single 1 then eight 0s.
+    g.z80Write8(0x6000, 0x01);
+    var i: u32 = 0;
+    while (i < 8) : (i += 1) g.z80Write8(0x6000, 0x00);
+    try testing.expectEqual(@as(u9, 1), g.z80_bank);
+
+    // Bank 1 * 32 KiB = 0x8000, so the window's first byte is rom[0x8000].
+    try testing.expectEqual(@as(u8, 0xAB), g.z80Read8(0x8000));
+}
+
+test "Z80 sees its own RAM mirrored across 0x0000-0x3FFF" {
+    var c = Cpu{};
+    var g = Genesis{ .rom = &.{}, .cpu = &c };
+
+    g.z80Write8(0x0010, 0x42);
+    try testing.expectEqual(@as(u8, 0x42), g.z80Read8(0x2010));
+}
+
+test "Z80's VDP window lands on the same VRAM the 68k writes" {
+    var c = Cpu{};
+    var g = Genesis{ .rom = &.{}, .cpu = &c };
+    g.write16(0xC00004, 0x4000); // VRAM write mode
+    g.write16(0xC00004, 0x0003); // address 0xC000 (see vdp.zig's own control-port test)
+
+    g.z80Write8(0x7F00, 0xAB); // data port: a byte write doubles into the word
+
+    try testing.expectEqual(@as(u8, 0xAB), g.v.vram[0xC000]);
 }
 
 test "version register reports export, NTSC, no expansion" {

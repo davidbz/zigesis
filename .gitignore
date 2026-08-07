@@ -22,3 +22,6 @@ roms/
 # Save states and SRAM saves written next to a ROM.
 *.state
 *.srm
+
+# SingleStepTests conformance corpora, fetched by tools/fetch_z80_tests.sh.
+testdata/
