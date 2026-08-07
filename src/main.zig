@@ -3,6 +3,7 @@
 //!     zig build run -Doptimize=ReleaseFast              # roms/Sonic-the-Hedgehog.bin
 //!     zig build run -- roms/other.bin
 //!     zig build run -- --shot 600 shot.png              # headless: N frames, then a PNG
+//!     zig build run -- --trace-z80                      # Z80 instruction trace to stderr
 //!
 //! Owns raylib: window, texture upload, input polling, and the headless
 //! --shot path. Everything under `genesis`, `scheduler` and `vdp` is plain
@@ -48,6 +49,7 @@ pub fn main(init: std.process.Init) !void {
     var shot_frames: ?u32 = null;
     var shot_path: [:0]const u8 = try gpa.dupeZ(u8, "shot.png");
     defer gpa.free(shot_path);
+    var trace_z80 = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--shot")) {
             shot_frames = try std.fmt.parseInt(u32, args.next() orelse "60", 10);
@@ -55,6 +57,8 @@ pub fn main(init: std.process.Init) !void {
                 gpa.free(shot_path);
                 shot_path = try gpa.dupeZ(u8, p);
             }
+        } else if (std.mem.eql(u8, arg, "--trace-z80")) {
+            trace_z80 = true;
         } else path = arg;
     }
 
@@ -68,7 +72,7 @@ pub fn main(init: std.process.Init) !void {
     // A megabyte of VDP and RAM: too much for the stack.
     const g = try gpa.create(Genesis);
     defer gpa.destroy(g);
-    g.* = .{ .rom = image, .cpu = &c };
+    g.* = .{ .rom = image, .cpu = &c, .z80_trace = trace_z80 };
 
     Core.reset(&c, g);
     std.debug.print("{s}: {d} KiB, reset pc={x:0>6} sp={x:0>8}\n", .{

@@ -44,7 +44,6 @@ From `examples/genesis_vdp.zig` (VDP 315-5313):
 
 Deliberately stubbed in the PoC, i.e. the actual work of this project:
 
-- Z80 (present as RAM only; nothing executes it).
 - YM2612 FM synthesizer (reads as never-busy).
 - SN76489 PSG.
 - Audio output of any kind.
@@ -70,8 +69,11 @@ zgen/
     scheduler.zig        # master-clock accounting, per-line stepping
     vdp.zig              # video display processor
     z80/
-      cpu.zig            # Z80 core (state + step)
-      decode.zig
+      cpu.zig            # architectural state (registers, flags, IFFs)
+      decode.zig         # opcode field decomposition, register tables
+      flags.zig          # ALU ops and their flag effects
+      core.zig           # fetch/decode/execute, Core(comptime Bus)
+      root.zig           # barrel module
     ym2612.zig           # FM synthesizer
     psg.zig              # SN76489
     audio.zig            # mixing, resampling, ring buffer to raylib
@@ -87,6 +89,7 @@ zgen/
     system_test.zig      # headless frame-hash regression suite
   tools/
     fetch_test_roms.sh   # public-domain test ROMs only
+    fetch_z80_tests.sh   # SingleStepTests/z80 conformance corpus
 ```
 
 ### 3.2 Data-oriented design (mandatory)
@@ -341,7 +344,7 @@ by the build graph, not just convention — only `main.zig` imports it.
 `test/system_test.zig` skips cleanly when `roms/` has no ROM (always true in
 CI, per §10) and gates on pinned hashes when one is present locally.
 
-### M1: Z80 core and bus integration
+### M1: Z80 core and bus integration — done
 
 Deliverables: Z80 CPU core in the z68k style (state struct, host-supplied
 bus, per-instruction cycles); wired into the machine with real
@@ -351,6 +354,19 @@ harness pattern z68k already uses) before wiring it in.
 Acceptance: Z80 conformance suite passes; games that hang without a live
 Z80 handshake now run; sound drivers execute (verified by trace) even
 though no audio is audible yet.
+
+`src/z80/{cpu,decode,flags,core}.zig` follow the `Core(comptime Bus)`
+generic shape (state/decode split from logic, same as `z68k`); `zig build
+z80-sst` runs the full SingleStepTests/z80 corpus and passes
+1,604,000/1,604,000 on both state and cycles (`tools/fetch_z80_tests.sh`
+fetches the corpus into the gitignored `testdata/`). `Genesis` owns the Z80
+`Cpu` by value and answers its bus (`z80Read8`/`z80Write8`/`z80In`/`z80Out`)
+directly; `scheduler.zig` steps it once per scanline with its own
+`zclk_debt` (mclk/15) alongside the 68k's, gated on real BUSREQ ($A11100)
+and RESET ($A11200) register semantics — held time earns no debt, so
+releasing the Z80 doesn't burst-execute a backlog it never had. `--trace-z80`
+prints a `[frame line cycle]`-prefixed PC/opcode/register line per Z80
+instruction to stderr.
 
 ### M2: PSG and the audio pipeline
 
