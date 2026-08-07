@@ -3,8 +3,9 @@
 //! the CPUs and VDP. Frame timing and interrupt delivery live in
 //! `scheduler.zig`; this file only answers bus reads and writes.
 //!
-//! The YM2612 and PSG are stubs: present enough in the memory map that a
-//! ROM's handshakes complete, but nothing synthesizes yet (M2/M3 in
+//! The PSG runs for real (`psg.zig`, stepped by `scheduler.zig` into the
+//! `audio` mixer). The YM2612 is still a stub: present enough in the memory
+//! map that a ROM's handshakes complete, but nothing synthesizes yet (M3 in
 //! DESIGN.md). The Z80 itself runs for real, with its own memory map,
 //! BUSREQ/RESET handshake, and banked window onto this same 68k bus.
 
@@ -12,21 +13,31 @@ const std = @import("std");
 const m68k = @import("m68k");
 const z80 = @import("z80");
 const vdp = @import("vdp");
+const psg = @import("psg");
+const audio = @import("audio");
 
 pub const Cpu = m68k.Cpu;
 pub const Core = m68k.Core(Genesis);
 pub const Z80Cpu = z80.Cpu;
 pub const Z80Core = z80.Core(Genesis);
+pub const Psg = psg.Psg;
+pub const Audio = audio.Mixer;
 
 // NTSC: a 53.693175 MHz master clock, seven of which make a 68000 cycle, 15
 // of which make a Z80 cycle, and 3420 of which make a scanline.
 // `scheduler.zig` drives the frame loop off these; `hvCounter` below needs
 // them too, so they live with the rest of the machine's hardware constants
 // rather than with the loop that steps it.
+pub const master_clock_hz: f64 = 53_693_175.0;
 pub const mclk_per_cpu = 7;
 pub const mclk_per_z80 = 15;
 pub const mclk_per_line = 3420;
 pub const lines_per_frame = 262;
+
+/// The PSG's output step is the Z80 clock divided by 16 (DESIGN.md §3.3);
+/// this is its native sample rate before `audio.zig` resamples to 48 kHz.
+pub const psg_divider = 16;
+pub const psg_hz = master_clock_hz / @as(f64, mclk_per_z80 * psg_divider);
 
 const ram_bytes = 64 << 10;
 const zram_bytes = 8 << 10;
@@ -52,6 +63,13 @@ pub const Genesis = struct {
     ram: [ram_bytes]u8 = @splat(0),
     zram: [zram_bytes]u8 = @splat(0),
     v: vdp.Vdp = .{},
+
+    p: Psg = .{},
+    audio: Audio = .{},
+    /// Sub-cycle remainder for the PSG's mclk/(15*16) native-rate divider,
+    /// same idea as `mclk_debt`. The PSG's clock keeps running even while
+    /// the Z80 is held in reset or busreq, so it is not gated by those.
+    psg_clk_debt: u64 = 0,
 
     z: Z80Cpu = .{},
     /// Held true by hardware at power-on; the 68k must write $A11200 to
@@ -127,6 +145,8 @@ pub const Genesis = struct {
             // A byte write to a VDP port still presents a full word, with the
             // byte in both halves.
             0xC0_0000...0xC0_000F => g.write16(addr & ~@as(u24, 1), @as(u16, val) << 8 | val),
+            // The PSG is wired to only the low byte of the data bus.
+            0xC0_0010...0xC0_001F => if (addr & 1 == 1) g.p.write(val),
             0xE0_0000...0xFF_FFFF => g.ram[addr & ram_mask] = val,
             else => {},
         }
@@ -217,7 +237,8 @@ pub const Genesis = struct {
         return switch (addr) {
             0x0000...0x3FFF => g.zram[addr & zram_mask],
             0x4000...0x5FFF => 0, // YM2612: never busy
-            0x7F00...0x7FFF => g.read8(0xC0_0000 | @as(u24, addr & 0x0F)),
+            // Mirrors 0xC00000-0xC0001F, which is where the PSG lives ($C00011).
+            0x7F00...0x7FFF => g.read8(0xC0_0000 | @as(u24, addr & 0x1F)),
             0x8000...0xFFFF => g.read8(g.z80BankAddr(addr)),
             else => 0xFF,
         };
@@ -228,9 +249,9 @@ pub const Genesis = struct {
             0x0000...0x3FFF => g.zram[addr & zram_mask] = val,
             // Loaded LSB-first: each write shifts the new bit into bit 8.
             0x6000...0x60FF => g.z80_bank = (g.z80_bank >> 1) | (@as(u9, val & 1) << 8),
-            0x7F00...0x7FFF => g.write8(0xC0_0000 | @as(u24, addr & 0x0F), val),
+            0x7F00...0x7FFF => g.write8(0xC0_0000 | @as(u24, addr & 0x1F), val),
             0x8000...0xFFFF => g.write8(g.z80BankAddr(addr), val),
-            else => {}, // YM2612/PSG: writes accepted, nothing to synthesize yet
+            else => {}, // YM2612: writes accepted, nothing to synthesize yet
         }
     }
 
