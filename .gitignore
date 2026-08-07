@@ -15,8 +15,8 @@ zig-pkg/
 zig-cache/
 zig-out/
 
-# ROMs: commercial ROMs (Sonic-the-Hedgehog.bin, etc.) are never committed,
-# and hardware test ROMs are fetched by tools/fetch_test_roms.sh.
+# ROMs: commercial ROMs are never committed; free test ROMs are fetched by
+# tools/fetch_test_roms.sh.
 roms/
 
 # Save states and SRAM saves written next to a ROM.

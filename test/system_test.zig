@@ -2,10 +2,11 @@
 //! raylib anywhere in its import graph, and hashes the framebuffer at a few
 //! fixed checkpoints.
 //!
-//! Commercial ROMs are never committed or fetched (DESIGN.md §10): this
-//! test looks for one in `roms/`, gitignored, and skips cleanly when it is
-//! absent — which is always, in CI. A maintainer with a legal copy of the
-//! ROM runs it locally and gates on the hashes pinned below.
+//! The ROM is Cave Story MD (https://github.com/andwn/cave-story-md), a
+//! freely distributable open-source homebrew, fetched into the gitignored
+//! `roms/` directory by `tools/fetch_test_roms.sh` and pinned to a release
+//! tag so its bytes never change. The test skips cleanly when the ROM is
+//! absent; run the fetch script once to enable it.
 
 const std = @import("std");
 const genesis = @import("genesis");
@@ -15,22 +16,22 @@ const Genesis = genesis.Genesis;
 const Cpu = genesis.Cpu;
 const Core = genesis.Core;
 
-const rom_path = "roms/Sonic-the-Hedgehog.bin";
-const max_rom_bytes = 4 << 20;
+const rom_path = "roms/doukutsu-en.gen";
+const max_rom_bytes = 8 << 20;
 
 const Checkpoint = struct { frame: u32, expected: u64 };
 
 const checkpoints = [_]Checkpoint{
-    .{ .frame = 60, .expected = 0xde64cb3e31e6f7aa }, // past the Sega logo
-    .{ .frame = 300, .expected = 0xccf77dc20adc1ad3 }, // title screen
-    .{ .frame = 600, .expected = 0xf00436ae93ff4a87 }, // attract-mode demo running
+    .{ .frame = 60, .expected = 0xa46b13979b5ddf92 }, // boot
+    .{ .frame = 300, .expected = 0xd251378cc7ee0066 }, // intro cutscene
+    .{ .frame = 600, .expected = 0x3cbf28f634870a6d }, // title screen
 };
 
 fn frameHash(g: *const Genesis) u64 {
     return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(&g.v.fb));
 }
 
-test "Sonic 1 boots headless and renders the same frames every run" {
+test "Cave Story MD boots headless and renders the same frames every run" {
     const rom = std.Io.Dir.cwd().readFileAlloc(
         std.testing.io,
         rom_path,

@@ -1,7 +1,6 @@
 //! zigesis — Sega Genesis / Mega Drive emulator entry point.
 //!
-//!     zig build run -Doptimize=ReleaseFast              # roms/Sonic-the-Hedgehog.bin
-//!     zig build run -- roms/other.bin
+//!     zig build run -Doptimize=ReleaseFast -- path/to/rom.bin
 //!     zig build run -- --shot 600 shot.png              # headless: N frames, then a PNG
 //!     zig build run -- --trace-z80                      # Z80 instruction trace to stderr
 //!
@@ -22,7 +21,6 @@ const Genesis = genesis.Genesis;
 const Cpu = genesis.Cpu;
 const Core = genesis.Core;
 
-const default_rom = "roms/Sonic-the-Hedgehog.bin";
 const scale = 3;
 
 fn pollInput(g: *Genesis) void {
@@ -45,7 +43,7 @@ pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, gpa);
     defer args.deinit();
     _ = args.skip();
-    var path: []const u8 = default_rom;
+    var path: ?[]const u8 = null;
     var shot_frames: ?u32 = null;
     var shot_path: [:0]const u8 = "shot.png";
     var trace_z80 = false;
@@ -58,8 +56,12 @@ pub fn main(init: std.process.Init) !void {
         } else path = arg;
     }
 
-    const image = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(4 << 20)) catch |err| {
-        std.debug.print("cannot read {s}: {t}\n", .{ path, err });
+    const rom_path = path orelse {
+        std.debug.print("usage: zigesis <rom> [--shot N [out.png]] [--trace-z80]\n", .{});
+        return error.NoRomGiven;
+    };
+    const image = std.Io.Dir.cwd().readFileAlloc(io, rom_path, gpa, .limited(8 << 20)) catch |err| {
+        std.debug.print("cannot read {s}: {t}\n", .{ rom_path, err });
         return err;
     };
     defer gpa.free(image);
@@ -72,7 +74,7 @@ pub fn main(init: std.process.Init) !void {
 
     Core.reset(&c, g);
     std.debug.print("{s}: {d} KiB, reset pc={x:0>6} sp={x:0>8}\n", .{
-        path, image.len >> 10, c.pc, c.a[7],
+        rom_path, image.len >> 10, c.pc, c.a[7],
     });
 
     var frames: u32 = 0;
