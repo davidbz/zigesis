@@ -1,7 +1,7 @@
 .{
-    .name = .zgen,
+    .name = .zigesis,
     .version = "0.0.0",
-    .fingerprint = 0xdade91fc35be832e,
+    .fingerprint = 0xf6e1848491b017ee,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .z68k = .{

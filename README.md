@@ -1,8 +1,8 @@
-# zgen
+# zigesis
 
 A Sega Genesis / Mega Drive emulator written in Zig.
 
-zgen is built on top of [z68k](https://github.com/davidbz/z68k), a
+zigesis is built on top of [z68k](https://github.com/davidbz/z68k), a
 conformance-tested Motorola 68000 core, and adds the rest of the machine:
 the Z80 sound coprocessor, the VDP, memory map and bus arbitration, and a
 small desktop frontend. Full scope, architecture, and engineering standards
@@ -26,7 +26,7 @@ for the full plan and acceptance criteria):
 ## Requirements
 
 - [Zig](https://ziglang.org/) 0.16.0 (see `build.zig.zon`).
-- To build the `zgen` executable (not required for the library modules or
+- To build the `zigesis` executable (not required for the library modules or
   test suites): the system libraries [raylib](https://www.raylib.com/)
   needs to open a window and a GL context. On Linux:
 
@@ -42,12 +42,12 @@ for the full plan and acceptance criteria):
 
 ```
 zig build check    # compile everything, no linking or execution (fast)
-zig build          # build the zgen executable into zig-out/bin/
+zig build          # build the zigesis executable into zig-out/bin/
 ```
 
 ## Running
 
-zgen needs a Genesis ROM image; it does not ship with one. Commercial ROMs
+zigesis needs a Genesis ROM image; it does not ship with one. Commercial ROMs
 are never distributed by this project — supply your own legally obtained
 copy.
 

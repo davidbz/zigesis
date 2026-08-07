@@ -1,4 +1,4 @@
-# zgen: Sega Genesis / Mega Drive Emulator
+# zigesis: Sega Genesis / Mega Drive Emulator
 
 Design document and milestone plan. Audience: coding agents and human contributors.
 This document is the source of truth for scope, architecture, and engineering
@@ -55,11 +55,11 @@ Deliberately stubbed in the PoC, i.e. the actual work of this project:
 
 ### 3.1 Repository layout
 
-New repository (working name `zgen`) consuming z68k as a Zig package
+New repository (working name `zigesis`) consuming z68k as a Zig package
 dependency. Do not fork the CPU into this repo.
 
 ```
-zgen/
+zigesis/
   build.zig
   build.zig.zon          # deps: z68k, raylib (lazy)
   DESIGN.md              # this file
