@@ -15,6 +15,8 @@ RUN apt-get update && apt-get install -y \
     ltrace \
     bash-completion \
     nodejs \
+    xxd \
+    ripgrep \
     minisign && \
     apt-get autoremove -y && \
     apt-get clean autoclean && \
