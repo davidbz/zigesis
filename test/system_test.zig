@@ -2,11 +2,15 @@
 //! window, no raylib anywhere in its import graph, and hashes the
 //! framebuffer and the resampled PSG output at fixed checkpoints.
 //!
-//! The ROM is Cave Story MD (https://github.com/andwn/cave-story-md), a
-//! freely distributable open-source homebrew, fetched into the gitignored
-//! `roms/` directory by `tools/fetch_test_roms.sh` and pinned to a release
-//! tag so its bytes never change. The test skips cleanly when the ROM is
-//! absent; run the fetch script once to enable it.
+//! Two ROMs, both fetched into the gitignored `roms/` directory by
+//! `tools/fetch_test_roms.sh` and both pinned by checksum so their bytes
+//! never change: Cave Story MD (https://github.com/andwn/cave-story-md), a
+//! freely distributable open-source homebrew, for the boot-to-gameplay and
+//! audio checkpoints; and Nemesis' VDPFIFOTesting for VDP conformance.
+//!
+//! Every test here skips cleanly when its ROM is absent, so a fresh checkout
+//! is green before anything is downloaded; run the fetch script once to
+//! enable them.
 
 const std = @import("std");
 const audio = @import("audio");
@@ -58,10 +62,10 @@ fn frameHash(g: *const Genesis) u64 {
 
 /// Boots the ROM into a heap-allocated machine (a megabyte of VDP and RAM is
 /// too much for the stack), or skips the test when the ROM was never fetched.
-fn boot(c: *Cpu) !*Genesis {
+fn boot(c: *Cpu, path: []const u8) !*Genesis {
     const rom = std.Io.Dir.cwd().readFileAlloc(
         std.testing.io,
-        rom_path,
+        path,
         std.testing.allocator,
         .limited(max_rom_bytes),
     ) catch |err| switch (err) {
@@ -83,7 +87,7 @@ fn shutdown(g: *Genesis) void {
 
 test "Cave Story MD boots headless and renders the same frames every run" {
     var c = Cpu{};
-    const g = try boot(&c);
+    const g = try boot(&c, rom_path);
     defer shutdown(g);
 
     var frame: u32 = 0;
@@ -101,7 +105,7 @@ const audio_expected: u64 = 0x4ba1579a075bf2f9;
 
 test "the resampled PSG output is the same bytes every run" {
     var c = Cpu{};
-    const g = try boot(&c);
+    const g = try boot(&c, rom_path);
     defer shutdown(g);
 
     var hasher = std.hash.Wyhash.init(0);
@@ -124,4 +128,35 @@ test "the resampled PSG output is the same bytes every run" {
     const expected_samples = ticks * genesis.psg_rate.out / genesis.psg_rate.in;
     try std.testing.expectEqual(expected_samples, samples);
     try std.testing.expectEqual(audio_expected, hasher.final());
+}
+
+/// Nemesis' VDP conformance ROM, also fetched by `tools/fetch_test_roms.sh`.
+/// It draws its own verdict on screen as a green/red bar per test, so hashing
+/// the framebuffer pins the *results*, not just the rendering: any change to
+/// FIFO, DMA, or port behaviour moves this hash.
+///
+/// The pinned value is today's failing score (4 of 29, tabulated in DESIGN.md
+/// §9 under M4) and is meant to move as M4 lands. A mismatch is not a
+/// failure to debug from the hash — run
+/// `zigesis roms/VDPFIFOTesting.bin out.png --shot 120 --hash`, look at the
+/// PNG, and re-pin.
+///
+/// ponytail: page 1 only, which is tests 1-9. The later pages need Start
+/// presses and minutes of emulated time, and page 5 onward does not render at
+/// all yet; widen this once the FIFO exists and there is a score worth
+/// watching.
+const vdp_rom_path = "roms/VDPFIFOTesting.bin";
+const vdp_frames = 120; // the page is drawn and static by frame 60
+const vdp_expected: u64 = 0xcff0f2056acd5cca;
+
+test "the VDP scores the same on VDPFIFOTesting page 1 every run" {
+    var c = Cpu{};
+    const g = try boot(&c, vdp_rom_path);
+    defer shutdown(g);
+
+    for (0..vdp_frames) |_| {
+        try std.testing.expect(!c.halted);
+        scheduler.runFrame(g, &c);
+    }
+    try std.testing.expectEqual(vdp_expected, frameHash(g));
 }
