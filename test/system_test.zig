@@ -101,7 +101,7 @@ test "Cave Story MD boots headless and renders the same frames every run" {
 /// percussion on the PSG's noise channel — clocked off tone channel 2, with a
 /// decaying attenuation envelope — and on through the menu jingle Start makes.
 const audio_frames = 900;
-const audio_expected: u64 = 0x4ba1579a075bf2f9;
+const audio_expected: u64 = 0x1e6fa6779c58c4ea;
 
 test "the resampled PSG output is the same bytes every run" {
     var c = Cpu{};

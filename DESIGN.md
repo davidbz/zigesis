@@ -248,7 +248,8 @@ raylib `AudioStream` at 48 kHz stereo, s16.
 
 Pipeline: YM2612 and PSG produce samples at their native rates during
 scanline stepping into per-chip buffers; `audio.zig` mixes and resamples to
-48 kHz (linear interpolation is sufficient initially) into a ring buffer;
+48 kHz into a ring buffer; the drop from a chip rate to 48 kHz needs a real
+antialias filter, not interpolation — see the note under §9 M2;
 the raylib stream callback drains it. The fill level of the ring buffer is
 the sync signal: sleep when far ahead, skip pacing when behind. This is the
 standard way to get both smooth audio and correct speed; do not attempt
@@ -392,14 +393,23 @@ playback, and a comptime 2 dB attenuation table. Tone frequency comes out
 as clock/(32 × period) by construction, which is the divider trap §7 warns
 about.
 
-`src/audio.zig` owns a fixed-size `Mixer`: a boxcar decimator into a
-fixed-size ring buffer, no allocation and no raylib import. The rate
-conversion is an exact integer fraction (48000 × 240 output ticks per
-53693175 master clocks) with its remainder carried across calls like
+`src/audio.zig` owns a fixed-size `Mixer`: a polyphase windowed-sinc
+decimator into a fixed-size ring buffer, no allocation and no raylib import.
+The rate conversion is an exact integer fraction (48000 × 240 output ticks
+per 53693175 master clocks) with its remainder carried across calls like
 `mclk_debt`, so a run of any length emits exactly the right sample count
-and resamples to the same bytes on every machine. Averaging the native
-samples an output sample covers costs one add and doubles as the low-pass
-that a 4.66:1 rate drop needs; §6.2 asks only for linear interpolation.
+and resamples to the same bytes on every machine. The filter is designed in
+floating point at comptime and shipped as a Q15 integer table, so nothing
+floating point runs in the frame path.
+
+This started as a boxcar — average the native samples an output sample
+covers — because that is one add and §6.2 asked only for interpolation. It
+is not enough. A boxcar's first null lands on the output rate rather than
+on Nyquist, so everything a square wave puts above 24 kHz folds back into
+the audible band at frequencies unrelated to the note. Measured on PSG
+square waves, the worst audible alias sat 33 dB under the fundamental for a
+3.5 kHz note and 46 dB under for 440 Hz — which is why it was the high
+beeps that sounded wrong. The sinc bank puts both at 76 dB and better.
 
 `scheduler.zig` steps the PSG once per line at mclk/240 with its own
 carried `pclk_debt`, ungated by Z80 BUSREQ/RESET — the chip is on the VDP

@@ -83,7 +83,7 @@ after an intentional change is a copy-paste rather than a hand edit:
 
 ```
 zigesis rom.gen --replay in.log --shot 900 --hash
-frame 900 fb=d4081df3ff6ad6db audio=4ba1579a075bf2f9 samples=720928
+frame 900 fb=d4081df3ff6ad6db audio=1e6fa6779c58c4ea samples=720928
 ```
 
 ## Testing
