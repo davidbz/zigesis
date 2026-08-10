@@ -1,9 +1,16 @@
 //! zigesis — Sega Genesis / Mega Drive emulator entry point.
 //!
 //!     zig build run -Doptimize=ReleaseFast -- path/to/rom.bin
-//!     zig build run -- --shot 600 shot.png              # headless: N frames, then a PNG
-//!     zig build run -- --trace-z80                      # Z80 instruction trace to stderr
-//!     zig build run -- --volume 50                      # 0-100, default 100
+//!     zig build run -- rom.bin --shot 600 shot.png      # headless: N frames, then a PNG
+//!     zig build run -- rom.bin --trace-z80              # Z80 instruction trace to stderr
+//!     zig build run -- rom.bin --volume 50              # 0-100, default 100
+//!     zig build run -- rom.bin --record in.log          # save one button byte per frame
+//!     zig build run -- rom.bin --replay in.log --shot 600 --hash
+//!
+//! `--record`/`--replay` make a run reproducible (DESIGN.md §6.3): the only
+//! nondeterminism in the machine is the controller, so a byte per frame is the
+//! whole input history. `--hash` prints the framebuffer and audio hashes the
+//! regression suite pins, so re-pinning them is a copy-paste.
 //!
 //! Owns raylib: window, texture upload, the audio stream, input polling, and
 //! the headless --shot path. Everything under `genesis`, `scheduler`, `vdp`
@@ -25,6 +32,13 @@ const Core = genesis.Core;
 
 const scale = 3;
 
+/// Only used when there's no audio device to pace against; NTSC's 262 lines of
+/// 3420 mclk are really 59.92 Hz, and raylib's timer can't express the fraction.
+const ntsc_fps = 60;
+
+/// One byte per frame at ~60 Hz, so this is a bit over three hours of input.
+const max_replay_bytes = 1 << 20;
+
 const audio_sample_size = 16; // s16
 const audio_channels = 2;
 /// raylib zero-pads a short `UpdateAudioStream`, so a sub-buffer is refilled
@@ -36,6 +50,38 @@ const audio_chunk_frames = 2048;
 /// level is the clock the emulator runs on (DESIGN.md §6.2) — surplus means
 /// sleep, deficit means run flat out.
 const audio_target_frames = 2 * audio_chunk_frames;
+
+/// A recorded input log: one byte of `Genesis.buttons` per frame, no header.
+/// Past the end replays as no buttons held, so a log shorter than the run
+/// still reproduces up to where it stops.
+const Replay = struct {
+    log: []const u8,
+
+    fn buttons(r: Replay, frame: u32) u8 {
+        return if (frame < r.log.len) r.log[frame] else 0;
+    }
+};
+
+/// Hashes the framebuffer and the resampled audio the same way
+/// `test/system_test.zig` does, so `--hash` output can be pasted straight into
+/// the pinned checkpoints there.
+const Hasher = struct {
+    audio: std.hash.Wyhash = .init(0),
+    samples: u64 = 0,
+
+    fn takeAudio(h: *Hasher, g: *Genesis) void {
+        while (g.audio.pop()) |s| : (h.samples += 1) h.audio.update(std.mem.asBytes(&s));
+    }
+
+    fn report(h: *Hasher, g: *const Genesis, frames: u32) void {
+        std.debug.print("frame {d} fb={x:0>16} audio={x:0>16} samples={d}\n", .{
+            frames,
+            std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(&g.v.fb)),
+            h.audio.final(),
+            h.samples,
+        });
+    }
+};
 
 fn pollInput(g: *Genesis) void {
     var b: u8 = 0;
@@ -83,19 +129,30 @@ pub fn main(init: std.process.Init) !void {
     var shot_path: [:0]const u8 = "shot.png";
     var trace_z80 = false;
     var volume_pct: u8 = 100;
+    var record_path: ?[]const u8 = null;
+    var replay_path: ?[]const u8 = null;
+    var want_hash = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--shot")) {
             shot_frames = try std.fmt.parseInt(u32, args.next() orelse "60", 10);
-            if (args.next()) |p| shot_path = p;
         } else if (std.mem.eql(u8, arg, "--trace-z80")) {
             trace_z80 = true;
         } else if (std.mem.eql(u8, arg, "--volume")) {
             volume_pct = @min(100, try std.fmt.parseInt(u8, args.next() orelse "100", 10));
-        } else path = arg;
+        } else if (std.mem.eql(u8, arg, "--record")) {
+            record_path = args.next() orelse return error.MissingRecordPath;
+        } else if (std.mem.eql(u8, arg, "--replay")) {
+            replay_path = args.next() orelse return error.MissingReplayPath;
+        } else if (std.mem.eql(u8, arg, "--hash")) {
+            want_hash = true;
+        } else if (path == null) {
+            path = arg;
+        } else shot_path = arg; // second positional: where --shot writes its PNG
     }
 
     const rom_path = path orelse {
-        std.debug.print("usage: zigesis <rom> [--shot N [out.png]] [--trace-z80] [--volume 0-100]\n", .{});
+        std.debug.print("usage: zigesis <rom> [out.png] [--shot N] [--trace-z80] " ++
+            "[--volume 0-100] [--record FILE] [--replay FILE] [--hash]\n", .{});
         return error.NoRomGiven;
     };
     const image = std.Io.Dir.cwd().readFileAlloc(io, rom_path, gpa, .limited(8 << 20)) catch |err| {
@@ -116,10 +173,29 @@ pub fn main(init: std.process.Init) !void {
         rom_path, image.len >> 10, c.pc, c.a[7],
     });
 
+    const replay: ?Replay = if (replay_path) |p| .{
+        .log = std.Io.Dir.cwd().readFileAlloc(io, p, gpa, .limited(max_replay_bytes)) catch |err| {
+            std.debug.print("cannot read replay {s}: {t}\n", .{ p, err });
+            return err;
+        },
+    } else null;
+    defer if (replay) |r| gpa.free(r.log);
+
+    var record: ?std.ArrayList(u8) = if (record_path == null) null else .empty;
+    defer if (record) |*r| r.deinit(gpa);
+
+    var hasher = Hasher{};
     var frames: u32 = 0;
     if (shot_frames) |n| {
         // Headless: no window, no GL — ExportImage only touches the pixels.
-        while (frames < n and !c.halted) : (frames += 1) scheduler.runFrame(g, &c);
+        while (frames < n and !c.halted) : (frames += 1) {
+            if (replay) |r| g.buttons = r.buttons(frames);
+            scheduler.runFrame(g, &c);
+            // Drained every frame so the fixed-size ring never drops a sample,
+            // exactly as the windowed loop and the regression suite drain it.
+            if (want_hash) hasher.takeAudio(g);
+        }
+        if (want_hash) hasher.report(g, frames);
         _ = rl.ExportImage(.{
             .data = &g.v.fb,
             .width = vdp.width,
@@ -147,13 +223,22 @@ pub fn main(init: std.process.Init) !void {
         // SetTargetFPS, just `paceToAudio` below.
         rl.InitAudioDevice();
         defer rl.CloseAudioDevice();
+        // Without a device nothing ever drains the mixer, so the ring sits
+        // full and `paceToAudio` would sleep the loop down to a crawl. Fall
+        // back to timer pacing and keep the picture running.
+        const has_audio = rl.IsAudioDeviceReady();
+        if (!has_audio) {
+            std.debug.print("no audio device; pacing on the frame timer instead\n", .{});
+            rl.SetTargetFPS(ntsc_fps);
+        }
         rl.SetAudioStreamBufferSizeDefault(audio_chunk_frames);
         const stream = rl.LoadAudioStream(audio.sample_rate, audio_sample_size, audio_channels);
         defer rl.UnloadAudioStream(stream);
         rl.PlayAudioStream(stream);
 
         while (!rl.WindowShouldClose() and !c.halted) : (frames += 1) {
-            pollInput(g);
+            if (replay) |r| g.buttons = r.buttons(frames) else pollInput(g);
+            if (record) |*r| try r.append(gpa, g.buttons);
             scheduler.runFrame(g, &c);
             rl.UpdateTexture(tex, &g.v.fb);
             rl.BeginDrawing();
@@ -166,9 +251,15 @@ pub fn main(init: std.process.Init) !void {
                 .{ .r = 255, .g = 255, .b = 255, .a = 255 },
             );
             rl.EndDrawing();
+            if (!has_audio) continue; // the mixer just drops; nothing reads it
             drainAudio(g, stream);
             paceToAudio(g, io);
         }
+    }
+
+    if (record) |*r| {
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = record_path.?, .data = r.items });
+        std.debug.print("recorded {d} frames of input to {s}\n", .{ r.items.len, record_path.? });
     }
 
     std.debug.print("{d} frames, {d} cycles ({d:.2}s emulated), pc={x:0>6} sr={x:0>4} halted={}\n", .{

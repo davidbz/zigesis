@@ -22,11 +22,35 @@ const max_rom_bytes = 8 << 20;
 
 const Checkpoint = struct { frame: u32, expected: u64 };
 
+/// `frame` is the number of frames run before hashing, so it means the same
+/// thing here as `--shot N` does on the command line and the pinned values can
+/// be regenerated with `zigesis <rom> --replay <log> --shot N --hash`.
 const checkpoints = [_]Checkpoint{
     .{ .frame = 60, .expected = 0xa46b13979b5ddf92 }, // boot
-    .{ .frame = 300, .expected = 0xd251378cc7ee0066 }, // intro cutscene
+    .{ .frame = 300, .expected = 0xd558811ccad79b7b }, // intro cutscene
     .{ .frame = 600, .expected = 0xd13de8a0c2506874 }, // title screen
+    .{ .frame = 900, .expected = 0xd4081df3ff6ad6db }, // save-data menu, past Start
 };
+
+/// The scripted input log DESIGN.md §6.3 asks for, inline rather than in a
+/// fixture file: Start held over these frames takes this ROM off its title
+/// screen into the save-data menu, so the suite covers a screen that only
+/// appears if input actually reaches the machine.
+const start_at = 620;
+const start_until = 641;
+
+fn buttonsAt(frame: u32) u8 {
+    return if (frame >= start_at and frame < start_until) genesis.btn_start else 0;
+}
+
+/// Runs up to `until` total frames, feeding the scripted input.
+fn runTo(g: *Genesis, c: *Cpu, frame: *u32, until: u32) !void {
+    while (frame.* < until) : (frame.* += 1) {
+        try std.testing.expect(!c.halted);
+        g.buttons = buttonsAt(frame.*);
+        scheduler.runFrame(g, c);
+    }
+}
 
 fn frameHash(g: *const Genesis) u64 {
     return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(&g.v.fb));
@@ -62,23 +86,18 @@ test "Cave Story MD boots headless and renders the same frames every run" {
     const g = try boot(&c);
     defer shutdown(g);
 
-    var next: usize = 0;
     var frame: u32 = 0;
-    while (next < checkpoints.len) : (frame += 1) {
-        try std.testing.expect(!c.halted);
-        scheduler.runFrame(g, &c);
-        if (frame != checkpoints[next].frame) continue;
-
-        try std.testing.expectEqual(checkpoints[next].expected, frameHash(g));
-        next += 1;
+    for (checkpoints) |cp| {
+        try runTo(g, &c, &frame, cp.frame);
+        try std.testing.expectEqual(cp.expected, frameHash(g));
     }
 }
 
-/// Ten seconds: long enough to reach the title screen, where this ROM's
-/// driver plays its percussion on the PSG's noise channel — clocked off tone
-/// channel 2, with a decaying attenuation envelope.
-const audio_frames = 600;
-const audio_expected: u64 = 0xebb50a14ea6202b5;
+/// Fifteen seconds: past the title screen, where this ROM's driver plays its
+/// percussion on the PSG's noise channel — clocked off tone channel 2, with a
+/// decaying attenuation envelope — and on through the menu jingle Start makes.
+const audio_frames = 900;
+const audio_expected: u64 = 0x4ba1579a075bf2f9;
 
 test "the resampled PSG output is the same bytes every run" {
     var c = Cpu{};
@@ -87,8 +106,10 @@ test "the resampled PSG output is the same bytes every run" {
 
     var hasher = std.hash.Wyhash.init(0);
     var samples: u64 = 0;
-    for (0..audio_frames) |_| {
+    var frame: u32 = 0;
+    while (frame < audio_frames) : (frame += 1) {
         try std.testing.expect(!c.halted);
+        g.buttons = buttonsAt(frame);
         scheduler.runFrame(g, &c);
         // Drained every frame so the fixed-size ring never drops a sample,
         // exactly as `main.zig`'s loop drains it.

@@ -58,13 +58,33 @@ copy.
 
 ```
 zig build run -Doptimize=ReleaseFast -- path/to/rom.bin
-zig build run -- rom.bin --shot 600 shot.png   # headless: run N frames, write a PNG
+zig build run -- rom.bin shot.png --shot 600   # headless: run N frames, write a PNG
 zig build run -- rom.bin --trace-z80           # Z80 instruction trace to stderr
 zig build run -- rom.bin --volume 50           # 0-100, default 100
+zig build run -- rom.bin --record in.log       # save one button byte per frame
+zig build run -- rom.bin --replay in.log       # play that input back
+zig build run -- rom.bin --shot 900 --hash     # print the pinned regression hashes
 ```
+
+The ROM is the first positional argument and the PNG path the second; flags
+may appear in any order.
 
 Controls: arrow keys for the d-pad, A/S/D for buttons A/B/C, Enter for
 Start.
+
+### Deterministic replay
+
+The controller is the only nondeterminism in the machine, so `--record` writes
+one byte of button state per frame and `--replay` feeds it back. A replayed run
+is bit-identical across runs, machines, and optimization levels, which makes
+every bug a reproducible bug (DESIGN.md §6.3). `--hash` prints the framebuffer
+and resampled-audio hashes that `test/system_test.zig` pins, so re-pinning them
+after an intentional change is a copy-paste rather than a hand edit:
+
+```
+zigesis rom.gen --replay in.log --shot 900 --hash
+frame 900 fb=d4081df3ff6ad6db audio=4ba1579a075bf2f9 samples=720928
+```
 
 ## Testing
 
@@ -81,6 +101,12 @@ distributable open-source homebrew — and checks the framebuffer and the
 resampled PSG output against pinned hashes. Fetch the ROM once with
 `tools/fetch_test_roms.sh` (pinned to a release tag, into the gitignored
 `roms/`); the test skips cleanly when it is absent.
+
+The same script also fetches [Nemesis' VDPFIFOTesting
+ROM](http://nemesis.hacking-cult.org/MegaDrive/Roms/Test/Mine/VDP/), the VDP
+conformance suite. It is not part of `zig build test` — it self-reports on
+screen, so it is run by hand and read from a screenshot. Where the VDP
+currently stands against it is tabulated in `DESIGN.md` section 9, M4.
 
 ### Z80 conformance suite
 
@@ -131,7 +157,7 @@ test/
   system_test.zig     headless frame-hash and audio-hash regression suite
   z80_sst_test.zig    SingleStepTests/z80 conformance runner
 tools/
-  fetch_test_roms.sh  fetches the free test ROM for the regression suite into roms/
+  fetch_test_roms.sh  fetches the free test ROMs (regression suite, VDP conformance) into roms/
   fetch_z80_tests.sh  fetches the Z80 conformance corpus into testdata/
 ```
 
