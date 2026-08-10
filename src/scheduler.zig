@@ -43,10 +43,13 @@ pub fn runFrame(g: *Genesis, c: *Cpu) void {
         } else g.v.hint_counter -= 1;
 
         g.mclk_debt += mclk_per_line;
-        const budget = g.mclk_debt / mclk_per_cpu;
+        const budget = g.mclk_debt / mclk_per_cpu -| g.cpu_over;
         g.mclk_debt %= mclk_per_cpu;
         g.line_start = c.cycles;
-        runLine(g, c, budget);
+        const end = c.cycles + budget;
+        runLine(g, c, end);
+        // Saturating: `runLine` also bails on `halted`, leaving cycles short.
+        g.cpu_over = c.cycles -| end;
 
         if (g.line < vdp.height) g.v.renderLine(g.line);
         if (g.line == vdp.height) {
@@ -67,10 +70,11 @@ fn runZ80Line(g: *Genesis) void {
     if (g.z80_reset or g.z80_busreq) return;
 
     g.zclk_debt += mclk_per_line;
-    const budget = g.zclk_debt / mclk_per_z80;
+    const budget = g.zclk_debt / mclk_per_z80 -| g.z80_over;
     g.zclk_debt %= mclk_per_z80;
 
     const end = g.z.cycles + budget;
+    defer g.z80_over = g.z.cycles -| end;
     while (g.z.cycles < end) {
         if (g.z80_int_pending and Z80Core.interrupt(&g.z, g, .{ .int = true })) g.z80_int_pending = false;
         if (g.z80_trace) traceZ80(g);
@@ -100,8 +104,7 @@ fn traceZ80(g: *Genesis) void {
     });
 }
 
-fn runLine(g: *Genesis, c: *Cpu, budget: u64) void {
-    const end = c.cycles + budget;
+fn runLine(g: *Genesis, c: *Cpu, end: u64) void {
     while (c.cycles < end and !c.halted) {
         const level: u3 = if (g.v.vint_irq and g.v.vintEnabled())
             vint_level
@@ -164,6 +167,22 @@ test "mclk_debt carries the sub-cycle remainder so a frame's clock does not drif
 
     runFrame(&g, &c);
     try testing.expectEqual(@as(u64, (2 * mclk_per_frame) % mclk_per_cpu), g.mclk_debt);
+}
+
+test "a frame executes a frame's worth of 68000 cycles, not one instruction more per line" {
+    var c = Cpu{};
+    var g = spinGenesis(&c);
+
+    // An instruction is indivisible, so a line ends a few cycles past its
+    // budget. Repaying that out of the next line keeps the error bounded by
+    // one instruction; banking it instead compounds to over 1% a frame.
+    const frames = 10;
+    const start = c.cycles;
+    for (0..frames) |_| runFrame(&g, &c);
+
+    const want = @as(u64, mclk_per_line) * lines_per_frame * frames / mclk_per_cpu;
+    const got = c.cycles - start;
+    try testing.expect(got >= want -| 20 and got <= want + 20);
 }
 
 test "pclk_debt carries its remainder, and the PSG runs whatever the Z80 does" {

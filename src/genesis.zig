@@ -116,6 +116,15 @@ pub const Genesis = struct {
     /// And again for the PSG's /240. This one is never gated: the chip is on
     /// the VDP die and keeps running whatever the Z80 is doing.
     pclk_debt: u64 = 0,
+    /// Cycles the 68000's last line ran past its budget, because an
+    /// instruction is indivisible and the line boundary falls mid-instruction.
+    /// Repaid out of the next line's budget: unrepaid, it compounds line after
+    /// line and the CPU pulls ahead of the master clock by over 1%.
+    cpu_over: u64 = 0,
+    /// The same debt for the Z80. Its divider leaves no remainder (3420 is a
+    /// whole number of /15 cycles), but its instructions still straddle the
+    /// line boundary just like the 68000's.
+    z80_over: u64 = 0,
 
     // -------------------------------------------------------------- memory map
 

@@ -25,3 +25,6 @@ roms/
 
 # SingleStepTests conformance corpora, fetched by tools/fetch_z80_tests.sh.
 testdata/
+
+# Headless --shot output.
+*.png

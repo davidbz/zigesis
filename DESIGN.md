@@ -47,8 +47,15 @@ Deliberately stubbed in the PoC, i.e. the actual work of this project:
 - YM2612 FM synthesizer (reads as never-busy).
 - SN76489 PSG (done in M2).
 - Audio output of any kind (done in M2).
-- VDP: shadow/highlight, interlace, H32 mode (256px), per-line sprite/pixel
-  limits, sprite masking, PAL (V30/240-line) timing.
+- VDP rendering: shadow/highlight, interlace, H32 mode (256px), per-line
+  sprite/pixel limits, sprite masking, PAL (V30/240-line) timing.
+- VDP port and DMA timing: there is no FIFO, so the status register's
+  empty/full/DMA-busy bits are constants; DMA of every mode completes
+  instantly with no bus locking and no slot stealing; fill reaches VRAM only;
+  reads from most code values return 0; there is no HV counter latch and no
+  VSRAM data cache. This is invisible to games that only write during vblank
+  and fatal to the ones that do not, and it is what M4's conformance half is
+  for.
 - Save states, SRAM cartridge saves, mappers, options UI, key configuration.
 
 ## 3. Architecture
@@ -423,13 +430,87 @@ on a test bank; audio regression hashes pinned.
 
 ### M4: VDP completion
 
-Deliverables: shadow/highlight, H32 mode, interlace (including the double-
-resolution mode used by two-player split-screen games), per-line sprite and
-pixel limits, sprite masking, PAL (313-line, V30) timing, region selection.
+Two halves, and the second one is not optional: what the VDP *draws*, and how
+its ports *behave*.
+
+Rendering deliverables: shadow/highlight, H32 mode, interlace (including the
+double-resolution mode used by two-player split-screen games), per-line
+sprite and pixel limits, sprite masking, PAL (313-line, V30) timing, region
+selection.
+
+Conformance deliverables: a real FIFO, with the status register's empty,
+full, and DMA-busy bits driven by it instead of returned as constants; DMA
+metered against the cycle budget, holding the 68000 off and stealing slots
+rather than completing between two instructions; DMA fill and copy to all
+three memories, not VRAM alone; the full read-target matrix including the
+8-bit VRAM target and read-target switching; the HV counter latch behind
+register 0 bit 1; the VSRAM data cache; control-port partial-write and
+write-pending semantics.
+
 Acceptance: a curated screenshot suite (title screens and known-tricky
 scenes across around 10 games, both H32 and H40, NTSC and PAL) matches
 pinned hashes; interlaced double-resolution mode renders; overdraw-heavy
-scenes flicker like hardware instead of showing extra sprites.
+scenes flicker like hardware instead of showing extra sprites; and
+VDPFIFOTesting is walkable to its last page with every remaining failure
+written down and justified, against the baseline recorded below.
+
+The conformance half is sequenced first. Adding rendering features on top of
+a VDP whose ports lie about their state means pinning screenshot hashes to
+behaviour that is still wrong underneath, and re-pinning all of them once the
+FIFO lands.
+
+#### VDPFIFOTesting baseline (measured 2026-08-10, end of M2)
+
+Nemesis' VDP conformance ROM, fetched by `tools/fetch_test_roms.sh`, is the
+scoreboard for this milestone. It self-reports, so one `--shot` PNG is the
+whole verdict:
+
+```
+zigesis roms/VDPFIFOTesting.bin out.png --shot 900   # page 1
+```
+
+Start pages forward; the ROM needs roughly 900 frames per page to finish
+running its tests, so a `--replay` log that taps Start every 900 frames walks
+the whole suite. Where it stands today, cumulative pass/fail as the ROM
+reports it:
+
+| Page | Tests | Result |
+|------|-------|--------|
+| 1 | 1-9   | 0 / 9   |
+| 2 | 10-16 | 0 / 16  |
+| 3 | 17-19 | 1 / 19  |
+| 4 | 20-29 | 4 / 29  |
+| 5+ | 30-45 | unreadable — see below |
+
+From page 5 on the ROM's own UI stops rendering: the screen goes black, then
+to a solid backdrop colour, and never repaints. The 68000 is still alive in
+the ROM's main loop (`halted=false`, `pc` in `$0010f4`-`$001168` on every
+sample), so this is the VDP losing CRAM/VRAM state under those tests rather
+than the machine dying. Whatever fixes the causes below should be re-measured
+before anyone reads more into it.
+
+The failures are not 25 separate bugs. They are five gaps, all of them known
+and deliberate at M2:
+
+- **There is no FIFO.** `readStatus` returns a constant (`vdp.zig:107`) with
+  FIFO-empty set, FIFO-full clear, and DMA-busy clear, always. Every test that
+  polls those flags — FIFO buffer size, separate read/write buffer, the seven
+  DMA busy flag tests, FIFO-full-before-transfer, FIFO wait states — is reading
+  a fixed lie.
+- **DMA is instantaneous** (the `ponytail:` marker at `vdp.zig:181`): no bus
+  locking, no slot stealing, no CPU hold-off. `dmaDone` zeroes the length
+  registers but never advances the source registers, so the source-register
+  update tests cannot pass either.
+- **DMA fill only reaches VRAM** (`vdp.zig:121`), which rules out fill to CRAM
+  and VSRAM and the data-port-writes-during-fill tests.
+- **`readData` returns 0 for any code outside 0/4/8** (`vdp.zig:132`), so
+  read-target switching and the 8-bit VRAM read target `01100` fail.
+- **No HV counter latch and no VSRAM data cache.** `genesis.hvCounter` is a
+  live counter with no TH-edge latch behind register 0 bit 1.
+
+Two things already work: DMA transfer bus locking passes, and enough of the
+DMA transfer wrapping and length-register behaviour passes to give page 4 its
+4 points.
 
 ### M5: Frontend shell
 
