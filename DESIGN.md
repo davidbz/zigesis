@@ -391,9 +391,13 @@ resampled samples for a scripted input log) passes.
 white and periodic LFSR modes, noise clocked either off a fixed divider or
 off tone channel 2, the Sega variant's tone-period-0 behaviour (counter
 loaded with 1, not stopped — Sonic 1's percussion clocks its noise off a
-period-0 tone 3), and a comptime 2 dB attenuation table. Tone frequency comes out
-as clock/(32 × period) by construction, which is the divider trap §7 warns
-about.
+period-0 tone 3), a shift register that advances on the rising edge of the
+noise generator's square alone (so the noise runs at half the rate its period
+suggests), and a comptime 2 dB attenuation table scaled against the FM's level
+rather than to fill an i16 on its own — the two chips are mixed on the board,
+where a full-volume PSG channel is about a fifth of a full-scale FM channel.
+Tone frequency comes out as clock/(32 × period) by construction, which is the
+divider trap §7 warns about.
 
 `src/audio.zig` owns a fixed-size `Mixer`: a polyphase windowed-sinc
 decimator into a fixed-size ring buffer, no allocation and no raylib import.

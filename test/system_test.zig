@@ -102,7 +102,7 @@ test "Cave Story MD boots headless and renders the same frames every run" {
 /// tone channel 2, with a decaying attenuation envelope — and on through the
 /// menu jingle Start makes.
 const audio_frames = 900;
-const audio_expected: u64 = 0x6751c2dcdadded6d;
+const audio_expected: u64 = 0x2154bd2b6d7f801b;
 
 test "the resampled sound output is the same bytes every run" {
     var c = Cpu{};
