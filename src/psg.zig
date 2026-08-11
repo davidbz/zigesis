@@ -131,14 +131,14 @@ pub const Psg = struct {
     }
 };
 
-/// A period of 0 is the documented DC quirk (DESIGN.md §7): the channel
-/// stops toggling and sits high, which games abuse for crude sample
-/// playback by pulsing the volume register instead.
+/// A period of 0 does not stop the channel. The Sega-integrated PSG loads
+/// the counter with 1 instead (the discrete TI part loads 0x400), so the
+/// channel runs at its highest frequency — ~112 kHz, far past anything
+/// audible, which is the real reason a period-0 channel reads as DC — and
+/// keeps clocking the noise channel when noise runs off tone 3. Falling out
+/// of the counter with a reload value of 0 gives exactly that: a toggle
+/// every tick. Sonic 1's percussion is nothing but this.
 fn stepTone(period: u10, counter: *u10, output: *bool) bool {
-    if (period == 0) {
-        output.* = true;
-        return false;
-    }
     if (counter.* > 1) {
         counter.* -= 1;
         return false;
@@ -186,14 +186,35 @@ test "a latch byte alone sets volume from its low nibble" {
     try testing.expectEqual(@as(u4, 0x0A), p.atten[0]);
 }
 
-test "tone period 0 holds the channel at a constant high output" {
+test "tone period 0 is the highest frequency, not a stopped channel" {
     var p = Psg{};
     soloChannel(&p, 0);
     p.tone[0] = 0;
 
-    const first = p.step();
-    try testing.expectEqual(first, p.step());
-    try testing.expect(first > 0); // stuck high, not silent
+    // Same as period 1: a toggle every tick.
+    var last = p.step();
+    for (0..8) |_| {
+        const cur = p.step();
+        try testing.expectEqual(-last, cur);
+        last = cur;
+    }
+}
+
+test "noise clocked off tone 3 still shifts when tone 3's period is 0" {
+    // Sonic 1's percussion: channel 3 silent at period 0 purely as the noise
+    // clock, white noise on channel 4, and a volume envelope on top. Freezing
+    // that counter leaves the shift register stuck and turns every drum hit
+    // into a DC click instead of a hi-hat.
+    var p = Psg{};
+    soloChannel(&p, 3);
+    p.write(latch_bit | (@as(u8, noise_ctrl_reg) << 4) | 0x04 | noise_rate_tone2);
+    p.tone[2] = 0;
+
+    var high: u32 = 0;
+    for (0..2000) |_| {
+        if (p.step() > 0) high += 1;
+    }
+    try testing.expect(high > 0 and high < 2000);
 }
 
 test "a tone channel toggles every `period` ticks, producing a square wave" {
@@ -239,7 +260,11 @@ test "white noise reaches both output levels; periodic noise stays a pulse" {
 test "louder attenuation steps produce larger samples, and 15 is silence" {
     var p = Psg{};
     soloChannel(&p, 0);
-    p.tone[0] = 0; // DC high, so the sample is the raw channel level
+    // A long period so the channel holds its level across all sixteen steps
+    // and the sample is the raw channel level.
+    p.tone[0] = 1000;
+    p.counter[0] = 1000;
+    p.output[0] = true;
 
     var prev: i16 = std.math.maxInt(i16);
     for (0..16) |atten| {

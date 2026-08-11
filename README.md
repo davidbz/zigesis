@@ -70,6 +70,7 @@ zig build run -- rom.bin --ladder              # the YM2612's analogue ladder ef
 zig build run -- rom.bin --mute 1,2,6          # silence FM channels (6 is the DAC)
 zig build run -- rom.bin --record in.log       # save one button byte per frame
 zig build run -- rom.bin --replay in.log       # play that input back
+zig build run -- rom.bin --shot 900 --wav out.wav  # headless: dump the mixed audio
 zig build run -- rom.bin --shot 900 --hash     # print the pinned regression hashes
 ```
 

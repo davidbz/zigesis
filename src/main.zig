@@ -5,6 +5,7 @@
 //!     zig build run -- rom.bin --trace-z80              # Z80 instruction trace to stderr
 //!     zig build run -- rom.bin --volume 50              # 0-100, default 100
 //!     zig build run -- rom.bin --record in.log          # save one button byte per frame
+//!     zig build run -- rom.bin --shot 900 --wav out.wav    # headless: dump the mixed audio
 //!     zig build run -- rom.bin --replay in.log --shot 600 --hash
 //!
 //! `--record`/`--replay` make a run reproducible (DESIGN.md §6.3): the only
@@ -83,6 +84,32 @@ const Hasher = struct {
     }
 };
 
+/// Minimal 44-byte canonical WAV header for 16-bit stereo PCM.
+fn writeWav(io: std.Io, path: []const u8, pcm: []const audio.Frame) !void {
+    const bytes = std.mem.sliceAsBytes(pcm);
+    var hdr: [44]u8 = undefined;
+    @memcpy(hdr[0..4], "RIFF");
+    std.mem.writeInt(u32, hdr[4..8], @intCast(36 + bytes.len), .little);
+    @memcpy(hdr[8..16], "WAVEfmt ");
+    std.mem.writeInt(u32, hdr[16..20], 16, .little);
+    std.mem.writeInt(u16, hdr[20..22], 1, .little); // PCM
+    std.mem.writeInt(u16, hdr[22..24], audio_channels, .little);
+    std.mem.writeInt(u32, hdr[24..28], audio.sample_rate, .little);
+    std.mem.writeInt(u32, hdr[28..32], audio.sample_rate * audio_channels * audio_sample_size / 8, .little);
+    std.mem.writeInt(u16, hdr[32..34], audio_channels * audio_sample_size / 8, .little);
+    std.mem.writeInt(u16, hdr[34..36], audio_sample_size, .little);
+    @memcpy(hdr[36..40], "data");
+    std.mem.writeInt(u32, hdr[40..44], @intCast(bytes.len), .little);
+
+    var f = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer f.close(io);
+    var buf: [4096]u8 = undefined;
+    var w = f.writer(io, &buf);
+    try w.interface.writeAll(&hdr);
+    try w.interface.writeAll(bytes);
+    try w.interface.flush();
+}
+
 fn pollInput(g: *Genesis) void {
     var b: u8 = 0;
     if (rl.IsKeyDown(rl.KEY_UP)) b |= genesis.btn_up;
@@ -132,6 +159,7 @@ pub fn main(init: std.process.Init) !void {
     var record_path: ?[]const u8 = null;
     var replay_path: ?[]const u8 = null;
     var want_hash = false;
+    var wav_path: ?[]const u8 = null;
     var ladder = false;
     var mute_list: ?[]const u8 = null;
     while (args.next()) |arg| {
@@ -145,6 +173,8 @@ pub fn main(init: std.process.Init) !void {
             record_path = args.next() orelse return error.MissingRecordPath;
         } else if (std.mem.eql(u8, arg, "--replay")) {
             replay_path = args.next() orelse return error.MissingReplayPath;
+        } else if (std.mem.eql(u8, arg, "--wav")) {
+            wav_path = args.next() orelse return error.MissingWavPath;
         } else if (std.mem.eql(u8, arg, "--hash")) {
             want_hash = true;
         } else if (std.mem.eql(u8, arg, "--ladder")) {
@@ -158,7 +188,7 @@ pub fn main(init: std.process.Init) !void {
 
     const rom_path = path orelse {
         std.debug.print("usage: zigesis <rom> [out.png] [--shot N] [--trace-z80] " ++
-            "[--volume 0-100] [--record FILE] [--replay FILE] [--hash] " ++
+            "[--volume 0-100] [--record FILE] [--replay FILE] [--hash] [--wav FILE] " ++
             "[--ladder] [--mute 1,2,6]\n", .{});
         return error.NoRomGiven;
     };
@@ -203,6 +233,8 @@ pub fn main(init: std.process.Init) !void {
     defer if (record) |*r| r.deinit(gpa);
 
     var hasher = Hasher{};
+    var pcm: std.ArrayList(audio.Frame) = .empty;
+    defer pcm.deinit(gpa);
     var frames: u32 = 0;
     if (shot_frames) |n| {
         // Headless: no window, no GL — ExportImage only touches the pixels.
@@ -212,8 +244,13 @@ pub fn main(init: std.process.Init) !void {
             // Drained every frame so the fixed-size ring never drops a sample,
             // exactly as the windowed loop and the regression suite drain it.
             if (want_hash) hasher.takeAudio(g);
+            if (wav_path != null) while (g.audio.pop()) |s| try pcm.append(gpa, s);
         }
         if (want_hash) hasher.report(g, frames);
+        if (wav_path) |p| {
+            try writeWav(io, p, pcm.items);
+            std.debug.print("wrote {d} frames of audio to {s}\n", .{ pcm.items.len, p });
+        }
         _ = rl.ExportImage(.{
             .data = &g.v.fb,
             .width = vdp.width,

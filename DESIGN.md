@@ -389,8 +389,9 @@ resampled samples for a scripted input log) passes.
 
 `src/psg.zig` is a from-scratch SN76489: three tone channels plus noise,
 white and periodic LFSR modes, noise clocked either off a fixed divider or
-off tone channel 2, the tone-period-0 DC quirk games use for sample
-playback, and a comptime 2 dB attenuation table. Tone frequency comes out
+off tone channel 2, the Sega variant's tone-period-0 behaviour (counter
+loaded with 1, not stopped — Sonic 1's percussion clocks its noise off a
+period-0 tone 3), and a comptime 2 dB attenuation table. Tone frequency comes out
 as clock/(32 × period) by construction, which is the divider trap §7 warns
 about.
 
