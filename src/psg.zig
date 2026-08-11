@@ -9,10 +9,16 @@
 
 const std = @import("std");
 
-/// Attenuation runs 2 dB per step over 16 steps, with step 15 silent. All
-/// four channels are summed into one i16, so a single channel's peak is
-/// scaled to leave room for the other three: 4 * 8191 <= 32767.
-const max_amplitude = 8191;
+/// Attenuation runs 2 dB per step over 16 steps, with step 15 silent.
+///
+/// The peak is what sets the PSG's level against the FM's, and the two chips
+/// are mixed on the board, not in software: a full-volume PSG channel swings
+/// about a fifth of what a full-scale FM channel does. `ym2612.zig` gives a
+/// channel 256 * 3 * `fm_gain`, so a fifth of that peak-to-peak is 768 either
+/// side of zero. Matching that ratio is the whole point of the number —
+/// scaling the PSG to fill an i16 on its own (which is what 8191 did) leaves
+/// it 20 dB over the music, and Sonic 1's squares and hats drown the FM.
+const max_amplitude = 768;
 const db_per_step = 2.0;
 const silent_atten: u4 = 15;
 
@@ -59,6 +65,11 @@ pub const Psg = struct {
     noise_white: bool = false,
     noise_rate: u2 = 0,
     noise_counter: u10 = 0,
+    /// The noise generator has a square of its own, toggled by its counter
+    /// exactly like a tone channel's, and the shift register advances on that
+    /// square's rising edge alone — so the noise runs at half the rate its
+    /// period suggests.
+    noise_phase: bool = false,
     lfsr: u16 = lfsr_reset,
 
     /// Register selected by the last latch byte, as channel * 2 + type.
@@ -114,6 +125,8 @@ pub const Psg = struct {
 
     fn stepNoise(p: *Psg, tone2_toggled: bool) void {
         if (!p.noiseClocked(tone2_toggled)) return;
+        p.noise_phase = !p.noise_phase;
+        if (!p.noise_phase) return;
 
         const taps = if (p.noise_white) white_noise_taps else periodic_noise_taps;
         const feedback: u16 = @popCount(p.lfsr & taps) & 1;
@@ -217,6 +230,45 @@ test "noise clocked off tone 3 still shifts when tone 3's period is 0" {
     try testing.expect(high > 0 and high < 2000);
 }
 
+/// How many ticks it takes the shift register to advance once, measured by
+/// running until it changes.
+fn ticksPerShift(p: *Psg) u32 {
+    const start = p.lfsr;
+    var ticks: u32 = 0;
+    while (p.lfsr == start) : (ticks += 1) {
+        _ = p.step();
+        // Long enough to catch a stuck register rather than spin forever.
+        if (ticks > 10_000) return ticks;
+    }
+    return ticks;
+}
+
+test "the shift register advances once every two periods, off any clock source" {
+    // The generator toggles a square of its own and only shifts on its rising
+    // edge, so the noise runs an octave below the rate its period reads as.
+    // Shifting on every period instead is the classic version of this bug, and
+    // it puts every hat, snare and noise effect an octave up.
+    for (noise_fixed_period, 0..) |period, rate| {
+        var p = Psg{};
+        soloChannel(&p, 3);
+        p.write(latch_bit | (@as(u8, noise_ctrl_reg) << 4) | 0x04 | @as(u8, @truncate(rate)));
+        // The first shift lands on the counter's first expiry, so it is the
+        // second one that spans a whole cycle of the generator's square.
+        _ = ticksPerShift(&p);
+        try testing.expectEqual(@as(u32, 2) * period, ticksPerShift(&p));
+    }
+
+    // Clocked off tone 3 the same halving applies, which is the path Sonic 1's
+    // percussion takes: one shift per full cycle of that channel's square, not
+    // one per toggle.
+    var t = Psg{};
+    soloChannel(&t, 3);
+    t.write(latch_bit | (@as(u8, noise_ctrl_reg) << 4) | 0x04 | noise_rate_tone2);
+    t.tone[2] = 20;
+    _ = ticksPerShift(&t);
+    try testing.expectEqual(@as(u32, 40), ticksPerShift(&t));
+}
+
 test "a tone channel toggles every `period` ticks, producing a square wave" {
     var p = Psg{};
     soloChannel(&p, 0);
@@ -244,17 +296,20 @@ test "white noise reaches both output levels; periodic noise stays a pulse" {
     try testing.expect(high > 0 and high < 2000);
 
     // Periodic noise recirculates the single reset bit around all 16 stages,
-    // so it is high for exactly one shift out of every 16.
+    // so it is high for exactly one shift out of every 16 — and a shift is two
+    // periods long, not one, because the register only advances on the rising
+    // edge of the noise generator's own square. Counting the ticks it stays
+    // high pins that halving: at one shift per period this reads 16.
     var periodic = Psg{};
     soloChannel(&periodic, 3);
     periodic.write(latch_bit | (@as(u8, noise_ctrl_reg) << 4) | 0x00); // periodic, rate 0
 
-    const ticks_per_shift = noise_fixed_period[0];
+    const ticks_per_shift = 2 * @as(u32, noise_fixed_period[0]);
     var pulses: u32 = 0;
     for (0..16 * ticks_per_shift) |_| {
         if (periodic.step() > 0) pulses += 1;
     }
-    try testing.expectEqual(@as(u32, ticks_per_shift), pulses);
+    try testing.expectEqual(ticks_per_shift, pulses);
 }
 
 test "louder attenuation steps produce larger samples, and 15 is silence" {
