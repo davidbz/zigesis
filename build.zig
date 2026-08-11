@@ -208,6 +208,14 @@ pub fn build(b: *std.Build) void {
             }),
         });
         zigesis.root_module.linkLibrary(raylib_dep.artifact("raylib"));
+        // ponytail: zig folds raylib's system libs (libGL.so, libX11.so, ...)
+        // into libraylib.a as archive members (ziglang/zig#20476). LLD warns
+        // once per member, and the build runner turns any unexpected linker
+        // stderr into a failed step — even though the same libraries are
+        // already on the link line as -lGL -lX11 ... and the link is fine.
+        // The self-hosted ELF linker skips them silently. Drop this once zig
+        // stops archiving .so paths.
+        zigesis.use_lld = false;
         b.installArtifact(zigesis);
         check_step.dependOn(&zigesis.step);
 
