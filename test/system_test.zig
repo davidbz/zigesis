@@ -1,6 +1,6 @@
 //! Headless frame-hash and audio-hash regression suite: boots a ROM with no
 //! window, no raylib anywhere in its import graph, and hashes the
-//! framebuffer and the resampled PSG output at fixed checkpoints.
+//! framebuffer and the resampled sound output at fixed checkpoints.
 //!
 //! Two ROMs, both fetched into the gitignored `roms/` directory by
 //! `tools/fetch_test_roms.sh` and both pinned by checksum so their bytes
@@ -97,19 +97,21 @@ test "Cave Story MD boots headless and renders the same frames every run" {
     }
 }
 
-/// Fifteen seconds: past the title screen, where this ROM's driver plays its
-/// percussion on the PSG's noise channel — clocked off tone channel 2, with a
-/// decaying attenuation envelope — and on through the menu jingle Start makes.
+/// Fifteen seconds: past the title screen, where this ROM's driver plays FM
+/// on the YM2612 and its percussion on the PSG's noise channel — clocked off
+/// tone channel 2, with a decaying attenuation envelope — and on through the
+/// menu jingle Start makes.
 const audio_frames = 900;
-const audio_expected: u64 = 0x1e6fa6779c58c4ea;
+const audio_expected: u64 = 0x6751c2dcdadded6d;
 
-test "the resampled PSG output is the same bytes every run" {
+test "the resampled sound output is the same bytes every run" {
     var c = Cpu{};
     const g = try boot(&c, rom_path);
     defer shutdown(g);
 
     var hasher = std.hash.Wyhash.init(0);
     var samples: u64 = 0;
+    var peak: i32 = 0;
     var frame: u32 = 0;
     while (frame < audio_frames) : (frame += 1) {
         try std.testing.expect(!c.halted);
@@ -117,16 +119,23 @@ test "the resampled PSG output is the same bytes every run" {
         scheduler.runFrame(g, &c);
         // Drained every frame so the fixed-size ring never drops a sample,
         // exactly as `main.zig`'s loop drains it.
-        while (g.audio.pop()) |s| : (samples += 1) hasher.update(std.mem.asBytes(&s));
+        while (g.audio.pop()) |s| : (samples += 1) {
+            hasher.update(std.mem.asBytes(&s));
+            peak = @max(peak, @as(i32, @intCast(@abs(@as(i32, s.l)))));
+        }
     }
 
     // A frame of emulated time is a frame's worth of 48 kHz samples; anything
     // else means the pipeline is running at the wrong rate, and a pitch-wrong
     // soundtrack is exactly the M2 hazard DESIGN.md §7 warns about.
-    const ticks = @as(u64, genesis.mclk_per_line) * genesis.lines_per_frame *
-        audio_frames / genesis.mclk_per_psg;
-    const expected_samples = ticks * genesis.psg_rate.out / genesis.psg_rate.in;
-    try std.testing.expectEqual(expected_samples, samples);
+    const mclk = @as(u64, genesis.mclk_per_line) * genesis.lines_per_frame * audio_frames;
+    const psg_frames = (mclk / genesis.mclk_per_psg) * genesis.psg_rate.out / genesis.psg_rate.in;
+    const ym_frames = (mclk / genesis.mclk_per_ym) * genesis.ym_rate.out / genesis.ym_rate.in;
+    // Minus one: the frame the leading chip is still filling is not ready.
+    try std.testing.expectEqual(@max(psg_frames, ym_frames) - 1, samples);
+    // This ROM's driver keys the FM channels and its DAC on at frame ~524, so
+    // silence here means the sound chips are wired up but never heard.
+    try std.testing.expect(peak > 4000);
     try std.testing.expectEqual(audio_expected, hasher.final());
 }
 

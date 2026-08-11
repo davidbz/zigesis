@@ -1,5 +1,12 @@
 const std = @import("std");
 
+/// Test data is gitignored, so the steps that need it are wired up only when
+/// it has been fetched — a fresh checkout still builds and tests green.
+fn dirExists(b: *std.Build, rel: []const u8) bool {
+    b.build_root.handle.access(b.graph.io, rel, .{}) catch return false;
+    return true;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -24,6 +31,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const ym2612 = b.addModule("ym2612", .{
+        .root_source_file = b.path("src/ym2612.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const audio = b.addModule("audio", .{
         .root_source_file = b.path("src/audio.zig"),
         .target = target,
@@ -38,6 +50,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "vdp", .module = vdp },
             .{ .name = "z80", .module = z80 },
             .{ .name = "psg", .module = psg },
+            .{ .name = "ym2612", .module = ym2612 },
             .{ .name = "audio", .module = audio },
         },
     });
@@ -71,6 +84,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(psg_tests).step);
     check_step.dependOn(&psg_tests.step);
 
+    const ym_tests = b.addTest(.{ .root_module = ym2612 });
+    test_step.dependOn(&b.addRunArtifact(ym_tests).step);
+    check_step.dependOn(&ym_tests.step);
+
     const audio_tests = b.addTest(.{ .root_module = audio });
     test_step.dependOn(&b.addRunArtifact(audio_tests).step);
     check_step.dependOn(&audio_tests.step);
@@ -99,6 +116,35 @@ pub fn build(b: *std.Build) void {
     system_tests_run.setCwd(b.path(".")); // roms/ is resolved relative to the project
     test_step.dependOn(&system_tests_run.step);
     check_step.dependOn(&system_tests.step);
+
+    // --- YM2612 differential harness ------------------------------------------
+    // Nuked-OPN2 is LGPL-2.1 and test-only: it is fetched into the gitignored
+    // testdata/ by tools/fetch_ym_reference.sh, never linked into the
+    // emulator, and this step only exists once it is there.
+    const nuked_dir = "testdata/nuked-opn2";
+    if (dirExists(b, nuked_dir)) {
+        const ym_nuked_mod = b.createModule(.{
+            .root_source_file = b.path("test/ym_nuked_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "ym2612", .module = ym2612 }},
+        });
+        ym_nuked_mod.addIncludePath(b.path(nuked_dir));
+        ym_nuked_mod.addCSourceFile(.{
+            .file = b.path(nuked_dir ++ "/ym3438.c"),
+            // Nuked shifts negative values left in its envelope generator,
+            // which is UB in C and traps under the sanitizer Debug turns on.
+            // It is the reference, not code to fix: let it wrap.
+            .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
+        });
+        const ym_nuked = b.addTest(.{ .root_module = ym_nuked_mod });
+        const ym_nuked_run = b.addRunArtifact(ym_nuked);
+        test_step.dependOn(&ym_nuked_run.step);
+        check_step.dependOn(&ym_nuked.step);
+        b.step("ym-nuked", "Diff the YM2612 against Nuked-OPN2, with the report")
+            .dependOn(&ym_nuked_run.step);
+    }
 
     // --- Z80 SingleStepTests conformance harness ------------------------------
     const z80_harness_mod = b.createModule(.{

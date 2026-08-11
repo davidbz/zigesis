@@ -100,7 +100,7 @@ fn pollInput(g: *Genesis) void {
 /// one ready. Polling like this is the pattern raylib's own audio-stream
 /// example uses, so there is no callback thread to synchronize with.
 fn drainAudio(g: *Genesis, stream: rl.AudioStream) void {
-    while (g.audio.len >= audio_chunk_frames and rl.IsAudioStreamProcessed(stream)) {
+    while (g.audio.ready() >= audio_chunk_frames and rl.IsAudioStreamProcessed(stream)) {
         var pcm: [audio_chunk_frames]audio.Frame = undefined;
         for (&pcm) |*frame| frame.* = g.audio.pop().?;
         rl.UpdateAudioStream(stream, &pcm, pcm.len);
@@ -111,9 +111,9 @@ fn drainAudio(g: *Genesis, stream: rl.AudioStream) void {
 /// the target; being behind returns immediately, so the emulator catches up
 /// on its own without ever needing to skip a frame.
 fn paceToAudio(g: *Genesis, io: std.Io) void {
-    if (g.audio.len <= audio_target_frames) return;
+    if (g.audio.ready() <= audio_target_frames) return;
 
-    const surplus_ms = (g.audio.len - audio_target_frames) * std.time.ms_per_s / audio.sample_rate;
+    const surplus_ms = (g.audio.ready() - audio_target_frames) * std.time.ms_per_s / audio.sample_rate;
     io.sleep(.fromMilliseconds(@intCast(surplus_ms)), .awake) catch {};
 }
 
@@ -132,6 +132,8 @@ pub fn main(init: std.process.Init) !void {
     var record_path: ?[]const u8 = null;
     var replay_path: ?[]const u8 = null;
     var want_hash = false;
+    var ladder = false;
+    var mute_list: ?[]const u8 = null;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--shot")) {
             shot_frames = try std.fmt.parseInt(u32, args.next() orelse "60", 10);
@@ -145,6 +147,10 @@ pub fn main(init: std.process.Init) !void {
             replay_path = args.next() orelse return error.MissingReplayPath;
         } else if (std.mem.eql(u8, arg, "--hash")) {
             want_hash = true;
+        } else if (std.mem.eql(u8, arg, "--ladder")) {
+            ladder = true;
+        } else if (std.mem.eql(u8, arg, "--mute")) {
+            mute_list = args.next() orelse return error.MissingMuteList;
         } else if (path == null) {
             path = arg;
         } else shot_path = arg; // second positional: where --shot writes its PNG
@@ -152,7 +158,8 @@ pub fn main(init: std.process.Init) !void {
 
     const rom_path = path orelse {
         std.debug.print("usage: zigesis <rom> [out.png] [--shot N] [--trace-z80] " ++
-            "[--volume 0-100] [--record FILE] [--replay FILE] [--hash]\n", .{});
+            "[--volume 0-100] [--record FILE] [--replay FILE] [--hash] " ++
+            "[--ladder] [--mute 1,2,6]\n", .{});
         return error.NoRomGiven;
     };
     const image = std.Io.Dir.cwd().readFileAlloc(io, rom_path, gpa, .limited(8 << 20)) catch |err| {
@@ -167,6 +174,17 @@ pub fn main(init: std.process.Init) !void {
     defer gpa.destroy(g);
     g.* = .{ .rom = image, .cpu = &c, .z80_trace = trace_z80 };
     g.audio.volume_pct = volume_pct;
+    g.y.ladder = ladder;
+    // Channels are named 1-6 the way the register map and every tracker names
+    // them; anything else in the list is a typo worth reporting.
+    if (mute_list) |list| {
+        var it = std.mem.tokenizeAny(u8, list, ", ");
+        while (it.next()) |field| {
+            const ch = std.fmt.parseInt(u8, field, 10) catch return error.BadMuteList;
+            if (ch < 1 or ch > g.y.mute.len) return error.BadMuteList;
+            g.y.mute[ch - 1] = true;
+        }
+    }
 
     Core.reset(&c, g);
     std.debug.print("{s}: {d} KiB, reset pc={x:0>6} sp={x:0>8}\n", .{

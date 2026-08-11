@@ -68,11 +68,17 @@ jobs:
           restore-keys: |
             zig-${{ runner.os }}-${{ matrix.zig }}-
             zig-${{ runner.os }}-
-      - name: Compile check
-        run: zig build check
+      # Both fetches come before `check`: the ROM suite and the Nuked-OPN2
+      # differential suite skip themselves when their data is missing, so a
+      # fetch that runs late is a green build that tested less than it looks.
       - name: Fetch test ROM
         shell: bash
         run: tools/fetch_test_roms.sh
+      - name: Fetch YM2612 reference
+        shell: bash
+        run: tools/fetch_ym_reference.sh
+      - name: Compile check
+        run: zig build check
       - name: Run tests
         run: zig build test
 
