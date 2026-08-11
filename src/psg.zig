@@ -230,6 +230,45 @@ test "noise clocked off tone 3 still shifts when tone 3's period is 0" {
     try testing.expect(high > 0 and high < 2000);
 }
 
+/// How many ticks it takes the shift register to advance once, measured by
+/// running until it changes.
+fn ticksPerShift(p: *Psg) u32 {
+    const start = p.lfsr;
+    var ticks: u32 = 0;
+    while (p.lfsr == start) : (ticks += 1) {
+        _ = p.step();
+        // Long enough to catch a stuck register rather than spin forever.
+        if (ticks > 10_000) return ticks;
+    }
+    return ticks;
+}
+
+test "the shift register advances once every two periods, off any clock source" {
+    // The generator toggles a square of its own and only shifts on its rising
+    // edge, so the noise runs an octave below the rate its period reads as.
+    // Shifting on every period instead is the classic version of this bug, and
+    // it puts every hat, snare and noise effect an octave up.
+    for (noise_fixed_period, 0..) |period, rate| {
+        var p = Psg{};
+        soloChannel(&p, 3);
+        p.write(latch_bit | (@as(u8, noise_ctrl_reg) << 4) | 0x04 | @as(u8, @truncate(rate)));
+        // The first shift lands on the counter's first expiry, so it is the
+        // second one that spans a whole cycle of the generator's square.
+        _ = ticksPerShift(&p);
+        try testing.expectEqual(@as(u32, 2) * period, ticksPerShift(&p));
+    }
+
+    // Clocked off tone 3 the same halving applies, which is the path Sonic 1's
+    // percussion takes: one shift per full cycle of that channel's square, not
+    // one per toggle.
+    var t = Psg{};
+    soloChannel(&t, 3);
+    t.write(latch_bit | (@as(u8, noise_ctrl_reg) << 4) | 0x04 | noise_rate_tone2);
+    t.tone[2] = 20;
+    _ = ticksPerShift(&t);
+    try testing.expectEqual(@as(u32, 40), ticksPerShift(&t));
+}
+
 test "a tone channel toggles every `period` ticks, producing a square wave" {
     var p = Psg{};
     soloChannel(&p, 0);

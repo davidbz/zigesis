@@ -510,3 +510,42 @@ test "hvCounter reports the line in the high byte and ramps through it in the lo
     try testing.expectEqual(@as(u8, 5), @as(u8, @truncate(mid >> 8)));
     try testing.expect(@as(u8, @truncate(mid)) > 0 and @as(u8, @truncate(mid)) < 0xFF);
 }
+
+test "a full-volume PSG channel sits a fifth of a full-scale FM channel, as the board mixes them" {
+    var c = Cpu{};
+    var g = Genesis{ .rom = &.{}, .cpu = &c };
+
+    // Channel 6's DAC drives the same ±256 a channel's own output does, so it
+    // stands in for a full-scale FM channel without an operator patch. Both
+    // levels are read as peak-to-peak, which is what the ratio is about, and
+    // taking the difference of two DAC codes cancels anything the other five
+    // channels might be contributing.
+    g.write8(0xA0_4000, 0x2b);
+    g.write8(0xA0_4001, 0x80); // DAC enable
+    g.write8(0xA0_4000, 0x2a);
+    g.write8(0xA0_4001, 0x00);
+    const fm_low = g.y.step().l;
+    g.write8(0xA0_4001, 0xff);
+    const fm_pp = g.y.step().l - fm_low;
+
+    // Tone 0 at period 1 and attenuation 0: a toggle every tick at full
+    // volume, so two steps span the channel's whole swing.
+    g.write8(0xC0_0011, 0x80 | 0x01); // tone 0, period low nibble 1
+    g.write8(0xC0_0011, 0x00); // ...and high bits 0
+    g.write8(0xC0_0011, 0x90); // tone 0, attenuation 0
+    var lo: i32 = 0;
+    var hi: i32 = 0;
+    for (0..4) |_| {
+        const s = g.p.step();
+        lo = @min(lo, s);
+        hi = @max(hi, s);
+    }
+    const psg_pp = hi - lo;
+
+    // Genesis Plus GX puts a PSG channel at 2800 against ±8192 per FM channel
+    // (0.17), BlastEm at 2340 against ±5372 (0.22); both are matched against a
+    // real board. Anywhere in that neighbourhood is right, ten times over it
+    // is the bug this pins: the PSG drowning the music in Sonic 1.
+    const ratio = @as(f64, @floatFromInt(psg_pp)) / @as(f64, @floatFromInt(fm_pp));
+    try testing.expect(ratio > 0.15 and ratio < 0.30);
+}

@@ -134,8 +134,12 @@ test "the resampled sound output is the same bytes every run" {
     // Minus one: the frame the leading chip is still filling is not ready.
     try std.testing.expectEqual(@max(psg_frames, ym_frames) - 1, samples);
     // This ROM's driver keys the FM channels and its DAC on at frame ~524, so
-    // silence here means the sound chips are wired up but never heard.
+    // silence here means the sound chips are wired up but never heard. The
+    // upper bound is the other half of the balance the PSG's level sets: both
+    // chips at once still have to fit, and a mix that reaches the rail is one
+    // clamping loud notes into buzz.
     try std.testing.expect(peak > 4000);
+    try std.testing.expect(peak < std.math.maxInt(i16));
     try std.testing.expectEqual(audio_expected, hasher.final());
 }
 
