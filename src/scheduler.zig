@@ -19,6 +19,7 @@ const mclk_per_cpu = genesis.mclk_per_cpu;
 const mclk_per_z80 = genesis.mclk_per_z80;
 const mclk_per_line = genesis.mclk_per_line;
 const mclk_per_psg = genesis.mclk_per_psg;
+const mclk_per_ym = genesis.mclk_per_ym;
 const lines_per_frame = genesis.lines_per_frame;
 
 /// The 68000's effective clock, derived from the master clock and its divider.
@@ -31,7 +32,6 @@ pub fn runFrame(g: *Genesis, c: *Cpu) void {
     g.line = 0;
     while (g.line < lines_per_frame) : (g.line += 1) {
         runZ80Line(g);
-        runPsgLine(g);
 
         // The H-int counter reloads throughout blanking and counts down
         // once per line over the active display.
@@ -67,6 +67,12 @@ pub fn runFrame(g: *Genesis, c: *Cpu) void {
 /// held in reset or busreq): held time earns no debt, so releasing it
 /// doesn't burst-execute a backlog of cycles it never really had.
 fn runZ80Line(g: *Genesis) void {
+    // The sound chips are stepped alongside the Z80, a slice per instruction,
+    // and whatever is left of the line is paid off here — including the whole
+    // line when the Z80 is held.
+    var spent: u64 = 0;
+    defer runChips(g, mclk_per_line - spent);
+
     if (g.z80_reset or g.z80_busreq) return;
 
     g.zclk_debt += mclk_per_line;
@@ -78,23 +84,40 @@ fn runZ80Line(g: *Genesis) void {
     while (g.z.cycles < end) {
         if (g.z80_int_pending and Z80Core.interrupt(&g.z, g, .{ .int = true })) g.z80_int_pending = false;
         if (g.z80_trace) traceZ80(g);
+        const before = g.z.cycles;
         Z80Core.step(&g.z, g);
+        // Clamped: a line's chips are worth exactly one line of clock, and an
+        // instruction that overruns the budget must not borrow from the next.
+        const slice = @min((g.z.cycles - before) * mclk_per_z80, mclk_per_line - spent);
+        spent += slice;
+        runChips(g, slice);
     }
 }
 
-/// The PSG's share of a line's master clock, resampled straight into the
-/// mixer. Its clock is never gated the way the Z80's is: the chip sits on
-/// the VDP die and runs off the system clock whatever the Z80 is doing.
+/// The sound chips' share of the master clock, resampled straight into the
+/// mixer. Neither is gated the way the Z80 is: the PSG sits on the VDP die,
+/// the YM2612 has its own crystal divider, and both run whatever the CPUs do.
 ///
-/// ponytail: register writes land at line granularity, so the PSG hears a
-/// line's worth of them at once (~64 us). Split the line at the write if a
-/// game's volume-pulsed PCM ever needs finer resolution.
-fn runPsgLine(g: *Genesis) void {
-    g.pclk_debt += mclk_per_line;
-    const budget = g.pclk_debt / mclk_per_psg;
+/// ponytail: the Z80 drives this a few microseconds at a time, so a sound
+/// driver's DAC writes land where they were written, but the 68000 runs a
+/// whole line before the chips hear it. Slice `runLine` the same way if a
+/// game ever streams PCM from the 68k side.
+fn runChips(g: *Genesis, mclk: u64) void {
+    g.pclk_debt += mclk;
+    const psg_ticks = g.pclk_debt / mclk_per_psg;
     g.pclk_debt %= mclk_per_psg;
+    for (0..psg_ticks) |_| {
+        const v = g.p.step();
+        g.audio.pushNative(.psg, v, v, genesis.psg_rate);
+    }
 
-    for (0..budget) |_| g.audio.pushNative(g.p.step(), genesis.psg_rate);
+    g.yclk_debt += mclk;
+    const ym_ticks = g.yclk_debt / mclk_per_ym;
+    g.yclk_debt %= mclk_per_ym;
+    for (0..ym_ticks) |_| {
+        const s = g.y.step();
+        g.audio.pushNative(.ym, s.l, s.r, genesis.ym_rate);
+    }
 }
 
 fn traceZ80(g: *Genesis) void {
@@ -185,7 +208,7 @@ test "a frame executes a frame's worth of 68000 cycles, not one instruction more
     try testing.expect(got >= want -| 20 and got <= want + 20);
 }
 
-test "pclk_debt carries its remainder, and the PSG runs whatever the Z80 does" {
+test "the chip clocks carry their remainders, and run whatever the Z80 does" {
     var c = Cpu{};
     var g = spinGenesis(&c);
     g.z80_busreq = true; // Z80 held off the bus for the whole frame
@@ -194,10 +217,12 @@ test "pclk_debt carries its remainder, and the PSG runs whatever the Z80 does" {
 
     runFrame(&g, &c);
     try testing.expectEqual(@as(u64, mclk_per_frame % mclk_per_psg), g.pclk_debt);
-    try testing.expect(g.audio.len > 0);
+    try testing.expectEqual(@as(u64, mclk_per_frame % mclk_per_ym), g.yclk_debt);
+    try testing.expect(g.audio.ready() > 0);
 
     runFrame(&g, &c);
     try testing.expectEqual(@as(u64, (2 * mclk_per_frame) % mclk_per_psg), g.pclk_debt);
+    try testing.expectEqual(@as(u64, (2 * mclk_per_frame) % mclk_per_ym), g.yclk_debt);
 }
 
 test "a frame of emulated time produces a frame's worth of 48 kHz samples" {
@@ -207,9 +232,11 @@ test "a frame of emulated time produces a frame's worth of 48 kHz samples" {
     runFrame(&g, &c);
 
     // 262 lines of 3420 mclk is one NTSC frame, ~1/59.92 s, so ~800 samples.
+    // Both chips resample onto the same frames, and a frame is only ready
+    // once the source behind has passed it, so the count is theirs minus one.
     const ticks = @as(u64, mclk_per_line) * lines_per_frame / mclk_per_psg;
     const expected = ticks * genesis.psg_rate.out / genesis.psg_rate.in;
-    try testing.expectEqual(expected, g.audio.len);
+    try testing.expectEqual(expected - 1, g.audio.ready());
 }
 
 test "runFrame raises VBlank once per frame and leaves it pending until the CPU takes it" {

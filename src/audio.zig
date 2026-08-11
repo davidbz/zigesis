@@ -88,60 +88,101 @@ fn firBank(comptime rate: Rate) [fir_phases][fir_taps]i32 {
     return bank;
 }
 
-pub const Mixer = struct {
-    ring: [capacity]Frame = undefined,
-    head: usize = 0,
-    len: usize = 0,
+/// The two sound chips, each resampled by its own filter state and summed in
+/// the ring. They run at unrelated native rates — mclk/240 and mclk/1008 —
+/// so there is no common grid to add them on before the rate drop.
+pub const Chip = enum(u1) { psg, ym };
 
+/// One chip's path from its native rate to the output rate.
+const Source = struct {
     /// Fractional position toward the next output sample, carried across
     /// calls exactly like `genesis.zig`'s `mclk_debt`.
     phase: u64 = 0,
     /// The last `fir_taps` native samples, oldest first at `hist_at`.
-    hist: [fir_taps]i16 = @splat(0),
+    hist: [fir_taps]Frame = @splat(.{ .l = 0, .r = 0 }),
     hist_at: usize = 0,
+    /// Output frames this source has finished contributing to.
+    produced: u64 = 0,
+};
+
+pub const Mixer = struct {
+    /// Frames under construction, indexed by absolute frame number. Wider
+    /// than the output so two full-scale chips can sum without wrapping;
+    /// clamped on the way out.
+    ring: [capacity]Frame32 = @splat(.{}),
+    /// Frames handed to the consumer, and the furthest any source has run.
+    emitted: u64 = 0,
+    produced: u64 = 0,
+
+    sources: [2]Source = @splat(.{}),
 
     volume_pct: u8 = 100,
 
-    /// Feeds one native-rate sample in, emitting an output frame whenever
-    /// enough of them have accumulated to cover one.
-    pub fn pushNative(m: *Mixer, sample: i16, comptime rate: Rate) void {
-        m.hist[m.hist_at] = sample;
-        m.hist_at = (m.hist_at + 1) % fir_taps;
+    const Frame32 = struct { l: i32 = 0, r: i32 = 0 };
 
-        m.phase += rate.out;
-        if (m.phase < rate.in) return;
-        m.phase -= rate.in;
+    /// Feeds one native-rate sample in, finishing an output frame whenever
+    /// enough of them have accumulated to cover one.
+    pub fn pushNative(m: *Mixer, chip: Chip, l: i16, r: i16, comptime rate: Rate) void {
+        const s = &m.sources[@intFromEnum(chip)];
+        s.hist[s.hist_at] = .{ .l = l, .r = r };
+        s.hist_at = (s.hist_at + 1) % fir_taps;
+
+        s.phase += rate.out;
+        if (s.phase < rate.in) return;
+        s.phase -= rate.in;
+        // Consumer fell behind: drop this frame rather than sum into one it
+        // has not read yet. Both sources stall on the same test, so they stay
+        // on the same frame when it catches up.
+        // Addition, not subtraction: a source that somehow fell behind the
+        // emitted frame would underflow into a permanent silent stall.
+        if (s.produced >= m.emitted + capacity) return;
 
         // What is left in `phase` is how far past the output instant this
         // sample sits, in units of `rate.out` per input sample. That fraction
         // is exactly what selects the filter phase.
         const bank = comptime firBank(rate);
-        const p = m.phase * fir_phases / rate.out;
+        const p = s.phase * fir_phases / rate.out;
 
-        var acc: i64 = 0;
-        for (bank[p], 0..) |c, j| acc += @as(i64, c) * m.hist[(m.hist_at + j) % fir_taps];
-        const v = acc >> fir_shift;
+        var left: i64 = 0;
+        var right: i64 = 0;
+        for (bank[p], 0..) |c, j| {
+            const h = s.hist[(s.hist_at + j) % fir_taps];
+            left += @as(i64, c) * h.l;
+            right += @as(i64, c) * h.r;
+        }
 
-        // A windowed sinc overshoots on a square edge, so a full-scale input
-        // can ring past i16. Clamp rather than wrap: wrapping turns a loud
-        // note into a burst of noise.
-        m.push(@intCast(std.math.clamp(v, std.math.minInt(i16), std.math.maxInt(i16))));
+        const slot = &m.ring[s.produced % capacity];
+        slot.l += @intCast(left >> fir_shift);
+        slot.r += @intCast(right >> fir_shift);
+        s.produced += 1;
+        m.produced = @max(m.produced, s.produced);
     }
 
-    fn push(m: *Mixer, mono: i16) void {
-        if (m.len == capacity) return; // consumer fell behind: drop, don't corrupt the ring
-        const scaled: i16 = @intCast(@divTrunc(@as(i32, mono) * m.volume_pct, 100));
-        m.ring[(m.head + m.len) % capacity] = .{ .l = scaled, .r = scaled };
-        m.len += 1;
+    /// Frames every source has finished. A source runs at most one frame
+    /// ahead of the other — an output frame is 1118 mclk and the slower
+    /// chip's native tick is 1008 — so the frame before the leader is always
+    /// complete.
+    pub fn ready(m: *const Mixer) usize {
+        return @intCast(m.produced -| m.emitted -| 1);
     }
 
-    /// Pops the oldest buffered frame, or null when the ring is empty.
+    /// Pops the oldest complete frame, or null when there is none.
     pub fn pop(m: *Mixer) ?Frame {
-        if (m.len == 0) return null;
-        const f = m.ring[m.head];
-        m.head = (m.head + 1) % capacity;
-        m.len -= 1;
-        return f;
+        if (m.ready() == 0) return null;
+        const slot = &m.ring[m.emitted % capacity];
+        defer {
+            slot.* = .{};
+            m.emitted += 1;
+        }
+        // Two chips summed, and a windowed sinc that overshoots on a square
+        // edge, both ring past i16. Clamp rather than wrap: wrapping turns a
+        // loud note into a burst of noise.
+        return .{ .l = m.scale(slot.l), .r = m.scale(slot.r) };
+    }
+
+    fn scale(m: *const Mixer, v: i32) i16 {
+        const adjusted = @divTrunc(@as(i64, v) * m.volume_pct, 100);
+        return @intCast(std.math.clamp(adjusted, std.math.minInt(i16), std.math.maxInt(i16)));
     }
 };
 
@@ -162,7 +203,7 @@ const settled = fir_taps;
 test "downsampling a constant signal yields that constant, at the right rate" {
     var m = Mixer{};
     const native_ticks: u64 = 40_000; // fewer output frames than `capacity`, so nothing is dropped
-    for (0..native_ticks) |_| m.pushNative(1000, test_rate);
+    for (0..native_ticks) |_| m.pushNative(.psg, 1000, 1000, test_rate);
 
     var frames: u64 = 0;
     while (m.pop()) |f| : (frames += 1) {
@@ -171,7 +212,9 @@ test "downsampling a constant signal yields that constant, at the right rate" {
         if (frames >= settled) try testing.expectEqual(@as(i16, 1000), f.l);
     }
 
-    try testing.expectEqual(native_ticks * test_rate.out / test_rate.in, frames);
+    // One frame short of what the ratio produces: the last one is not
+    // complete until a source runs past it.
+    try testing.expectEqual(native_ticks * test_rate.out / test_rate.in - 1, frames);
 }
 
 const native_hz = @as(f64, sample_rate) *
@@ -186,7 +229,8 @@ fn resampleSine(hz: f64, amplitude: f64, out: []i16) void {
     var i: usize = 0;
     while (kept < out.len) : (i += 1) {
         const t = @as(f64, @floatFromInt(i)) / native_hz;
-        m.pushNative(@intFromFloat(amplitude * @sin(2 * std.math.pi * hz * t)), test_rate);
+        const v: i16 = @intFromFloat(amplitude * @sin(2 * std.math.pi * hz * t));
+        m.pushNative(.psg, v, v, test_rate);
         while (m.pop()) |f| : (frames += 1) {
             if (frames >= settled and kept < out.len) {
                 out[kept] = f.l;
@@ -261,39 +305,65 @@ test "the phase remainder carries, so long runs do not drift" {
     const per_batch: u64 = 10_000;
     var produced: u64 = 0;
     for (0..batches) |_| {
-        for (0..per_batch) |_| m.pushNative(0, test_rate);
+        for (0..per_batch) |_| m.pushNative(.psg, 0, 0, test_rate);
         while (m.pop()) |_| produced += 1;
     }
 
     // Dropping the phase remainder rather than carrying it would lose most
     // of a sample per batch; carrying it keeps the count exact over any
     // number of them.
-    try testing.expectEqual(batches * per_batch * test_rate.out / test_rate.in, produced);
+    try testing.expectEqual(batches * per_batch * test_rate.out / test_rate.in - 1, produced);
 }
 
 test "volume_pct scales the output linearly" {
     var half = Mixer{ .volume_pct = 50 };
     var full = Mixer{};
     for (0..100) |_| {
-        half.pushNative(1000, test_rate);
-        full.pushNative(1000, test_rate);
+        half.pushNative(.psg, 1000, 1000, test_rate);
+        full.pushNative(.psg, 1000, 1000, test_rate);
     }
     try testing.expectEqual(@divTrunc(full.pop().?.l, 2), half.pop().?.l);
 }
 
-test "the ring drops samples instead of overflowing once full" {
+test "the ring drops frames instead of overflowing once full" {
     var m = Mixer{};
-    for (0..capacity + 100) |_| m.push(1);
-    try testing.expectEqual(@as(usize, capacity), m.len);
+    // Enough native samples for well over a ring's worth of output frames,
+    // with nothing draining them.
+    for (0..(capacity + 1000) * test_rate.in / test_rate.out) |_| m.pushNative(.psg, 1, 1, test_rate);
+    try testing.expectEqual(@as(usize, capacity - 1), m.ready());
+
+    var drained: usize = 0;
+    while (m.pop()) |_| drained += 1;
+    try testing.expectEqual(@as(usize, capacity - 1), drained);
 }
 
-test "pop drains in FIFO order and wraps around the ring" {
+test "two chips at different rates sum into the same frames" {
+    // Half the ratio, so this source produces the same output rate from a
+    // quarter as many native samples.
+    const other = Rate{ .out = test_rate.out * 4, .in = test_rate.in };
     var m = Mixer{};
-    // Push past the end of the array so head and tail both wrap.
-    for (0..capacity - 1) |_| m.push(0);
-    for (0..capacity - 1) |_| _ = m.pop();
+    for (0..40_000) |i| {
+        m.pushNative(.psg, 1000, 1000, test_rate);
+        if (i % 4 == 0) m.pushNative(.ym, 300, -300, other);
+    }
 
-    for (1..4) |i| m.push(@intCast(i));
-    for (1..4) |i| try testing.expectEqual(@as(i16, @intCast(i)), m.pop().?.l);
-    try testing.expectEqual(@as(?Frame, null), m.pop());
+    var frames: usize = 0;
+    while (m.pop()) |f| : (frames += 1) {
+        if (frames < settled) continue;
+        try testing.expectEqual(@as(i16, 1300), f.l);
+        try testing.expectEqual(@as(i16, 700), f.r);
+    }
+    try testing.expect(frames > 0);
+}
+
+test "the mixer clamps instead of wrapping when both chips run loud" {
+    var m = Mixer{};
+    for (0..40_000) |_| {
+        m.pushNative(.psg, 30_000, 30_000, test_rate);
+        m.pushNative(.ym, 30_000, 30_000, test_rate);
+    }
+    var frames: usize = 0;
+    while (m.pop()) |f| : (frames += 1) {
+        if (frames >= settled) try testing.expectEqual(@as(i16, std.math.maxInt(i16)), f.l);
+    }
 }

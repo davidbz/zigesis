@@ -3,10 +3,9 @@
 //! the CPUs and VDP. Frame timing and interrupt delivery live in
 //! `scheduler.zig`; this file only answers bus reads and writes.
 //!
-//! The PSG runs for real (`psg.zig`, stepped by `scheduler.zig` into the
-//! `audio` mixer this struct owns). The YM2612 is still a stub: present
-//! enough in the memory map that a ROM's handshakes complete, but nothing
-//! synthesizes yet (M3 in DESIGN.md). The Z80 runs for real too, with its
+//! Both sound chips run for real (`psg.zig` and `ym2612.zig`, stepped by
+//! `scheduler.zig` into the `audio` mixer this struct owns). The Z80 runs
+//! for real too, with its
 //! own memory map, BUSREQ/RESET handshake, and banked window onto this same
 //! 68k bus.
 
@@ -15,6 +14,7 @@ const m68k = @import("m68k");
 const z80 = @import("z80");
 const vdp = @import("vdp");
 const psg = @import("psg");
+const ym2612 = @import("ym2612");
 const audio = @import("audio");
 
 pub const Cpu = m68k.Cpu;
@@ -22,6 +22,7 @@ pub const Core = m68k.Core(Genesis);
 pub const Z80Cpu = z80.Cpu;
 pub const Z80Core = z80.Core(Genesis);
 pub const Psg = psg.Psg;
+pub const Ym2612 = ym2612.Ym2612;
 pub const Mixer = audio.Mixer;
 
 // NTSC: a 53.693175 MHz master clock, seven of which make a 68000 cycle, 15
@@ -43,6 +44,18 @@ pub const psg_rate = audio.Rate{
     .out = audio.sample_rate * mclk_per_psg,
     .in = master_clock_hz,
 };
+
+/// The YM2612 is clocked at the 68000's rate and takes 144 of those clocks
+/// per stereo sample (DESIGN.md §3.3), so mclk/1008, or about 53.3 kHz.
+pub const mclk_per_ym = mclk_per_cpu * ym2612.clocks_per_sample;
+pub const ym_rate = audio.Rate{
+    .out = audio.sample_rate * mclk_per_ym,
+    .in = master_clock_hz,
+};
+
+/// The YM2612's four ports, mirrored across the block the 68k decodes for it.
+const ym_port_lo: u24 = 0xA0_4000;
+const ym_port_hi: u24 = 0xA0_5FFF;
 
 const ram_bytes = 64 << 10;
 const zram_bytes = 8 << 10;
@@ -78,6 +91,7 @@ pub const Genesis = struct {
     v: vdp.Vdp = .{},
 
     p: Psg = .{},
+    y: Ym2612 = .{},
     audio: Mixer = .{},
 
     z: Z80Cpu = .{},
@@ -116,6 +130,8 @@ pub const Genesis = struct {
     /// And again for the PSG's /240. This one is never gated: the chip is on
     /// the VDP die and keeps running whatever the Z80 is doing.
     pclk_debt: u64 = 0,
+    /// And for the YM2612's /1008, which is never gated either.
+    yclk_debt: u64 = 0,
     /// Cycles the 68000's last line ran past its budget, because an
     /// instruction is indivisible and the line boundary falls mid-instruction.
     /// Repaid out of the next line's budget: unrepaid, it compounds line after
@@ -132,7 +148,7 @@ pub const Genesis = struct {
         return switch (addr) {
             0x00_0000...0x3F_FFFF => if (addr < g.rom.len) g.rom[addr] else 0xFF,
             0xA0_0000...0xA0_3FFF => g.zram[addr & zram_mask],
-            0xA0_4000...0xA0_5FFF => 0, // YM2612: never busy
+            ym_port_lo...ym_port_hi => g.y.status(),
             0xA1_0000...0xA1_001F => g.ioRead(addr),
             // Bit 0 low means the 68k has the bus; this model grants it the
             // instant it's requested, so it only ever reads busreq back.
@@ -161,6 +177,7 @@ pub const Genesis = struct {
         switch (addr) {
             0xA0_0000...0xA0_3FFF => g.zram[addr & zram_mask] = val,
             0xA1_0000...0xA1_001F => g.ioWrite(addr, val),
+            ym_port_lo...ym_port_hi => g.y.write(@truncate(addr), val),
             0xA1_1100...0xA1_11FF => g.z80_busreq = val & 1 != 0,
             0xA1_1200...0xA1_12FF => g.writeZ80Reset(val),
             // A byte write to a VDP port still presents a full word, with the
@@ -264,7 +281,7 @@ pub const Genesis = struct {
     pub fn z80Read8(g: *Genesis, addr: u16) u8 {
         return switch (addr) {
             0x0000...0x3FFF => g.zram[addr & zram_mask],
-            0x4000...0x5FFF => 0, // YM2612: never busy
+            0x4000...0x5FFF => g.y.status(),
             0x7F00...0x7FFF => g.read8(@as(u24, addr) & z80_vdp_mask | 0xC0_0000),
             0x8000...0xFFFF => g.read8(g.z80BankAddr(addr)),
             else => 0xFF,
@@ -274,11 +291,12 @@ pub const Genesis = struct {
     pub fn z80Write8(g: *Genesis, addr: u16, val: u8) void {
         switch (addr) {
             0x0000...0x3FFF => g.zram[addr & zram_mask] = val,
+            0x4000...0x5FFF => g.y.write(@truncate(addr), val),
             // Loaded LSB-first: each write shifts the new bit into bit 8.
             0x6000...0x60FF => g.z80_bank = (g.z80_bank >> 1) | (@as(u9, val & 1) << 8),
             0x7F00...0x7FFF => g.write8(@as(u24, addr) & z80_vdp_mask | 0xC0_0000, val),
             0x8000...0xFFFF => g.write8(g.z80BankAddr(addr), val),
-            else => {}, // YM2612: writes accepted, nothing to synthesize yet
+            else => {},
         }
     }
 

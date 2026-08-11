@@ -23,9 +23,14 @@ for the full plan and acceptance criteria):
 - **M2 — PSG and the audio pipeline: done.** A from-scratch SN76489 core, a
   resampling mixer and ring buffer with no allocation and no raylib import,
   and a raylib `AudioStream` frontend paced by the ring's fill level rather
-  than a fixed target FPS. PSG sound effects and percussion are audible; FM
-  music waits on M3.
-- **M3 and later** (YM2612, VDP completion, save states, debug tooling,
+  than a fixed target FPS. PSG sound effects and percussion are audible.
+- **M3 — YM2612: done.** A from-scratch six-channel four-operator FM core
+  (envelope generator with SSG-EG, all eight algorithms, LFO, timers,
+  channel 6 DAC, panning, the analogue ladder, per-channel mute), verified
+  sample by sample against Nuked-OPN2: exact on operators, detune, LFO,
+  panning and DAC, within 0.04% on the algorithms, within 0.14 dB on
+  envelope sweeps. Music and DAC drums play.
+- **M4 and later** (VDP completion, save states, debug tooling,
   compatibility pass) are not started.
 
 ## Requirements
@@ -61,6 +66,8 @@ zig build run -Doptimize=ReleaseFast -- path/to/rom.bin
 zig build run -- rom.bin shot.png --shot 600   # headless: run N frames, write a PNG
 zig build run -- rom.bin --trace-z80           # Z80 instruction trace to stderr
 zig build run -- rom.bin --volume 50           # 0-100, default 100
+zig build run -- rom.bin --ladder              # the YM2612's analogue ladder effect
+zig build run -- rom.bin --mute 1,2,6          # silence FM channels (6 is the DAC)
 zig build run -- rom.bin --record in.log       # save one button byte per frame
 zig build run -- rom.bin --replay in.log       # play that input back
 zig build run -- rom.bin --shot 900 --hash     # print the pinned regression hashes
@@ -83,7 +90,7 @@ after an intentional change is a copy-paste rather than a hand edit:
 
 ```
 zigesis rom.gen --replay in.log --shot 900 --hash
-frame 900 fb=d4081df3ff6ad6db audio=1e6fa6779c58c4ea samples=720928
+frame 900 fb=d4081df3ff6ad6db audio=6751c2dcdadded6d samples=720927
 ```
 
 ## Testing
@@ -92,13 +99,13 @@ frame 900 fb=d4081df3ff6ad6db audio=1e6fa6779c58c4ea samples=720928
 zig build test
 ```
 
-Runs, per module: VDP, Z80, PSG, audio mixer, `genesis` (memory map and
+Runs, per module: VDP, Z80, PSG, YM2612, audio mixer, `genesis` (memory map and
 bus), and `scheduler` (timing and interrupts) unit tests, plus two small Z80
 conformance-harness unit tests. It also runs the headless regression suite
 (`test/system_test.zig`), which boots
 [Cave Story MD](https://github.com/andwn/cave-story-md) — a freely
 distributable open-source homebrew — and checks the framebuffer and the
-resampled PSG output against pinned hashes. Fetch the ROM once with
+resampled sound output against pinned hashes. Fetch the ROM once with
 `tools/fetch_test_roms.sh` (pinned to a release tag, into the gitignored
 `roms/`); the test skips cleanly when it is absent.
 
@@ -107,6 +114,22 @@ ROM](http://nemesis.hacking-cult.org/MegaDrive/Roms/Test/Mine/VDP/), the VDP
 conformance suite. It is not part of `zig build test` — it self-reports on
 screen, so it is run by hand and read from a screenshot. Where the VDP
 currently stands against it is tabulated in `DESIGN.md` section 9, M4.
+
+### YM2612 differential suite
+
+The FM core is diffed sample by sample against
+[Nuked-OPN2](https://github.com/nukeykt/Nuked-OPN2), the die-shot-accurate
+reference, over register logs covering operators, algorithms, envelopes,
+SSG-EG, the LFO, panning, the DAC, and both timers:
+
+```
+tools/fetch_ym_reference.sh   # once: commit-pinned fetch into testdata/nuked-opn2/ (gitignored)
+zig build ym-nuked            # run it, with the per-case report
+```
+
+Nuked is LGPL-2.1 and test-only, so it is never vendored. `zig build test`
+picks the suite up when the reference is present and skips it entirely when
+it is not. The measured deviations are tabulated in `DESIGN.md` section 9, M3.
 
 ### Z80 conformance suite
 
@@ -127,9 +150,11 @@ large to fetch in ordinary CI runs.
 
 Single-threaded and master-clock driven: the 53.693175 MHz NTSC master
 clock is the only time base, and every chip's rate is a named integer
-divider of it (68000 at mclk/7, Z80 at mclk/15, PSG at mclk/240).
-`scheduler.zig` steps both CPUs and the PSG a scanline's worth of cycles at
-a time, carrying each one's sub-cycle remainder so timing does not drift.
+divider of it (68000 at mclk/7, Z80 at mclk/15, PSG at mclk/240, YM2612 at
+mclk/1008).
+`scheduler.zig` steps the 68000 a scanline's worth of cycles at a time and
+the Z80 an instruction at a time, running both sound chips alongside it and
+carrying each one's sub-cycle remainder so timing does not drift.
 Full detail in `DESIGN.md` section 3.3.
 
 The codebase follows a data-oriented design: every chip is a flat,
@@ -146,6 +171,7 @@ src/
   scheduler.zig       master-clock accounting, per-scanline stepping, interrupts
   vdp.zig             video display processor (315-5313)
   psg.zig             SN76489 PSG: tone and noise channels, attenuation
+  ym2612.zig          YM2612 FM: operators, envelopes, LFO, timers, DAC
   audio.zig           mixing, resampling, the ring buffer that feeds raylib
   z80/
     cpu.zig           architectural state: registers, flags, interrupt latches
@@ -159,6 +185,7 @@ test/
 tools/
   fetch_test_roms.sh  fetches the free test ROMs (regression suite, VDP conformance) into roms/
   fetch_z80_tests.sh  fetches the Z80 conformance corpus into testdata/
+  fetch_ym_reference.sh  fetches Nuked-OPN2, the FM reference, into testdata/
 ```
 
 The Motorola 68000 core itself (`m68k`) is not in this repository — it is

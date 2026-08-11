@@ -44,7 +44,7 @@ From `examples/genesis_vdp.zig` (VDP 315-5313):
 
 Deliberately stubbed in the PoC, i.e. the actual work of this project:
 
-- YM2612 FM synthesizer (reads as never-busy).
+- YM2612 FM synthesizer (done in M3).
 - SN76489 PSG (done in M2).
 - Audio output of any kind (done in M2).
 - VDP rendering: shadow/highlight, interlace, H32 mode (256px), per-line
@@ -97,6 +97,7 @@ zigesis/
   tools/
     fetch_test_roms.sh   # public-domain test ROMs only
     fetch_z80_tests.sh   # SingleStepTests/z80 conformance corpus
+    fetch_ym_reference.sh # Nuked-OPN2, the FM differential reference
 ```
 
 ### 3.2 Data-oriented design (mandatory)
@@ -411,11 +412,10 @@ square waves, the worst audible alias sat 33 dB under the fundamental for a
 3.5 kHz note and 46 dB under for 440 Hz — which is why it was the high
 beeps that sounded wrong. The sinc bank puts both at 76 dB and better.
 
-`scheduler.zig` steps the PSG once per line at mclk/240 with its own
-carried `pclk_debt`, ungated by Z80 BUSREQ/RESET — the chip is on the VDP
-die and runs off the system clock whatever the Z80 is doing. Register
-writes therefore land at line granularity (~64 µs); split the line at the
-write if a game's volume-pulsed PCM ever needs finer resolution.
+`scheduler.zig` steps the PSG at mclk/240 with its own carried `pclk_debt`,
+ungated by Z80 BUSREQ/RESET — the chip is on the VDP die and runs off the
+system clock whatever the Z80 is doing. This was once-per-line at M2 and is
+per Z80 instruction since M3.
 
 `main.zig` is the only consumer of raylib's `AudioStream`: it polls
 `IsAudioStreamProcessed`, hands over a whole sub-buffer at a time (raylib
@@ -428,7 +428,7 @@ was masked to $C00000-$C0000F, so a sound driver's PSG writes at $7F11
 landed on the VDP data port and corrupted CRAM. The window is 32 bytes
 wide, and the pinned frame hashes moved with the fix.
 
-### M3: YM2612
+### M3: YM2612 — done
 
 Deliverables: FM core (phase generator, envelope generator, operators,
 algorithms, LFO, timers, channel 6 DAC mode); stereo panning; ladder-effect
@@ -437,6 +437,62 @@ Acceptance: well-known FM-heavy commercial soundtracks are recognizably
 correct in pitch, tempo, and instrument character; DAC drums/voices play;
 register-log comparison against Nuked-OPN2 shows matching envelope shapes
 on a test bank; audio regression hashes pinned.
+
+`src/ym2612.zig` is a from-scratch six-channel four-operator FM core: a
+comptime sine and exponent table pair in the chip's log domain, phase
+generator with detune and multiple, key-scaled rates, the eight-state
+envelope generator including SSG-EG's four looping shapes, all eight
+algorithms with the three feedback taps, the AM/PM LFO, both timers with
+their overflow flags and CSM-less mode bits, per-channel stereo panning,
+channel 6's DAC, the analogue ladder as an option, and per-channel mute.
+State is one struct of arrays over 24 slots; `step()` returns one stereo
+sample per 144 chip clocks, the same 24-slot pass the die makes.
+
+Verification is differential rather than by ear: `test/ym_nuked_test.zig`
+drives the same register log into this core and into Nuked-OPN2 and diffs
+the output sample by sample. Nuked is LGPL and test-only, so
+`tools/fetch_ym_reference.sh` fetches it (commit-pinned, checksummed) into
+gitignored `testdata/nuked-opn2/` and `build.zig` skips the whole step when
+it is absent: `zig build ym-nuked` prints the report, `zig build test`
+includes it when the reference is there. Measured, over 32768 samples each:
+
+| Case | Deviation from Nuked |
+|---|---|
+| single operator, all 8 detunes, panning, DAC (ladder on and off) | exact |
+| LFO, all 8 frequencies, AM and PM | exact |
+| algorithms 0-7 | max 0.04%, rms 0.001% of full scale |
+| envelope banks (attack/decay/sustain/release sweeps) | ≤ 0.14 dB per window |
+| SSG-EG modes 0-7 | exact except mode 2, 0.70 dB |
+| timer A and B overflow counts | 191/191, 47/47 |
+
+Three deviations are known and deliberate. This model produces a sample per
+144 clocks where Nuked produces one per clock, so its output leads by three
+samples on write-driven cases; the harness aligns for it and reports the
+lead. The sustain knee is `>=` here and `==` on the die, which only differs
+when a register write moves the sustain level past a level the envelope has
+already passed. And a SSG-EG turnaround makes a one-sample click whose
+amplitude lands on a different point of the operator's sine here, which is
+all of mode 2's 0.70 dB.
+
+Two hardware details cost most of the debugging and are worth naming. The
+LFO prescaler is *masked* with its limit, not compared against it
+(`(count & limit) == limit`), which is the same thing counting up from zero
+and a different thing after a mid-sweep frequency change — that alone was
+the whole LFO mismatch. And the envelope counter's twelfth-bit carry is
+added back on the next sample, so the counter gains a tick every wrap;
+without it the envelopes drift apart over seconds rather than milliseconds.
+
+`scheduler.zig` now steps both sound chips per Z80 instruction rather than
+per line, so a driver's DAC writes land a few microseconds from where they
+were written; the YM2612 runs at mclk/1008 (the 68000's mclk/7 divided by
+the chip's 144 clocks per sample, ≈53.3 kHz) with its own carried
+`yclk_debt`. The mixer resamples both chips independently onto the same
+output frames, so the two rates need no common divisor. 68000-side writes
+still land at line granularity — slice `runLine` the same way if a game ever
+streams PCM from the 68k side.
+
+`--ladder` enables the analogue ladder effect and `--mute 1,2,6` silences
+channels by name, both for debugging a suspect instrument.
 
 ### M4: VDP completion
 
