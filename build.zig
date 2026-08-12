@@ -274,6 +274,7 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true, // raylib.h comes in through @cImport
                 .imports = &.{
                     .{ .name = "genesis", .module = genesis },
+                    .{ .name = "cart", .module = cart },
                     .{ .name = "scheduler", .module = scheduler },
                     .{ .name = "vdp", .module = vdp },
                     .{ .name = "audio", .module = audio },

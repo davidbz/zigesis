@@ -81,6 +81,13 @@ also menu entries: each lists the eight slots and the quicksave, showing
 whether a slot holds anything and how long ago it was written (`empty`,
 `just now`, `12m ago`), so nothing is overwritten or loaded blind.
 
+With a game running, the menu's right half is the cartridge itself, laid out
+like a cabinet: the game's own name on a lit marquee, and under it the serial,
+the region it claims against the timing it is being run at, the peripherals it
+wants, its size, its backup RAM, and whether the checksum in the header
+matches the bytes that follow it — green for `OK`, red for `BAD`, which is a
+quick way to spot a bad dump.
+
 ### Files beside the ROM
 
 Save states and cartridge backup RAM live next to the ROM, with an extension

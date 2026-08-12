@@ -27,6 +27,7 @@
 
 const std = @import("std");
 const genesis = @import("genesis");
+const cart = @import("cart");
 const scheduler = @import("scheduler");
 const vdp = @import("vdp");
 const audio = @import("audio");
@@ -226,6 +227,48 @@ fn flushSram(io: std.Io, g: *Genesis, rom_path: []const u8) !void {
     const path = try sidecarPath(&buf, rom_path, ".srm", .{});
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = &g.cart.sram });
     g.cart.sram_dirty = false;
+}
+
+/// The card the pause menu shows over the picture: what the cartridge header
+/// says about itself, plus what the file it came out of turned out to be.
+/// Built when the cartridge goes in, because none of it changes while the
+/// game plays.
+fn describeRom(ui: *shell.Ui, g: *const Genesis, rom: []const u8, rom_path: []const u8) void {
+    const info = cart.info(rom);
+    var title_buf: [48]u8 = undefined;
+    shell.cardStart(
+        ui,
+        // Homebrew and bad dumps leave the title blank; the filename is then
+        // the only name the thing has, and the marquee has to say something.
+        if (info.title.len != 0) cart.squeezed(&title_buf, info.title) else std.fs.path.basename(rom_path),
+        info.copyright,
+    );
+    shell.cardRow(ui, "FILE", .plain, "{s}", .{std.fs.path.basename(rom_path)});
+    shell.cardRow(ui, "SERIAL", .plain, "{s}", .{info.serial});
+    // The default raylib font is ASCII, so no bullets or dashes fancier than
+    // what a keyboard has.
+    shell.cardRow(ui, "REGION", .plain, "{s} / {s}", .{
+        info.region,
+        if (g.v.pal) "PAL 50Hz" else "NTSC 60Hz",
+    });
+    shell.cardRow(ui, "DEVICES", .plain, "{s}", .{info.devices});
+    shell.cardRow(ui, "SIZE", .plain, "{d} KiB", .{rom.len >> 10});
+    if (info.checksum == 0) {
+        // Homebrew often never fills the field in, and a dump that sums to
+        // nothing has not failed a check nobody made.
+        shell.cardRow(ui, "CHECKSUM", .plain, "NOT SET", .{});
+    } else {
+        const ok = info.checksumOk();
+        shell.cardRow(ui, "CHECKSUM", if (ok) .good else .bad, "{x:0>4} {s}", .{
+            info.checksum,
+            if (ok) "OK" else "BAD",
+        });
+    }
+    if (g.cart.sram_end > g.cart.sram_start) {
+        shell.cardRow(ui, "BACKUP", .plain, "{d} KiB", .{(@as(u32, g.cart.sram_end) - g.cart.sram_start + 1) >> 10});
+    } else {
+        shell.cardRow(ui, "BACKUP", .plain, "NONE", .{});
+    }
 }
 
 fn saveState(io: std.Io, g: *const Genesis, c: *const Cpu, rom_path: []const u8, slot: u8) !void {
@@ -546,6 +589,7 @@ fn windowed(
     if (path) |p| loadSram(io, g, p);
 
     var ui = shell.Ui{};
+    if (rom.*) |image| if (path) |p| describeRom(&ui, g, image, p);
     var sram_next: f64 = 0;
     var applied_scale = cfg.scale;
     var applied_fullscreen = false;
@@ -562,6 +606,9 @@ fn windowed(
                 if (path) |p| flushSram(io, g, p) catch |err| ui.status("cannot save SRAM: {t}", .{err});
                 startMachine(g, c, image, cfg.*, opts);
                 if (path) |p| loadSram(io, g, p);
+                // A reset is how a region change takes effect, so the card's
+                // NTSC/PAL line can be stale by now.
+                if (path) |p| describeRom(&ui, g, image, p);
             },
             .load => |p| {
                 const image = std.Io.Dir.cwd().readFileAlloc(io, p, gpa, .limited(max_rom_bytes)) catch |err| {
@@ -574,6 +621,7 @@ fn windowed(
                 path = keepPath(&path_buf, p);
                 startMachine(g, c, image, cfg.*, opts);
                 loadSram(io, g, path.?);
+                describeRom(&ui, g, image, path.?);
                 ui.status("{s}: {d} KiB", .{ p, image.len >> 10 });
                 frames = 0;
             },

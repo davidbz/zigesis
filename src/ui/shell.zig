@@ -58,6 +58,21 @@ const Act = union(enum) {
 
 const Item = struct { label: [:0]const u8, act: Act };
 
+/// How many lines of detail the cartridge card holds, which is as many as
+/// `main.zig` has to say about a cartridge.
+pub const card_rows = 8;
+
+/// One line of the card: what it is on the left, what the cartridge says on
+/// the right, and whether that reading is a good one. A scoreboard, which is
+/// how a machine that eats coins would put it.
+pub const Row = struct {
+    label: [10:0]u8 = @splat(0),
+    value: [40:0]u8 = @splat(0),
+    tone: Tone = .plain,
+};
+
+pub const Tone = enum { plain, good, bad };
+
 const root_items = [_]Item{
     .{ .label = "Resume", .act = .close },
     .{ .label = "Load ROM", .act = .{ .goto = .load } },
@@ -129,6 +144,13 @@ pub const Ui = struct {
     stamps: [slot_count]i64 = @splat(0),
     now: i64 = 0,
     stamps_dirty: bool = true,
+    /// The cartridge card on the root page: `main.zig` fills it in when a ROM
+    /// goes in, because none of it changes while the game plays. `card_n` of
+    /// zero means there is no cartridge and nothing to draw.
+    card_title: [48:0]u8 = @splat(0),
+    card_sub: [24:0]u8 = @splat(0),
+    card: [card_rows]Row = @splat(.{}),
+    card_n: usize = 0,
     browser: Browser = .{},
     path: [max_path:0]u8 = @splat(0),
     status_text: [96:0]u8 = @splat(0),
@@ -414,6 +436,37 @@ fn browserKeys(ui: *Ui) Request {
     return .none;
 }
 
+// ------------------------------------------------------------------- card
+
+/// Starts the cartridge card over: the marquee is the game's own name, with
+/// whoever put their copyright in the header under it.
+pub fn cardStart(ui: *Ui, title: []const u8, sub: []const u8) void {
+    setText(ui.card_title[0..], title);
+    setText(ui.card_sub[0..], sub);
+    ui.card_n = 0;
+}
+
+/// Adds a line to the card, up to `card_rows` of them. A value too long for
+/// its buffer is cut rather than dropped: half a serial still says something.
+pub fn cardRow(ui: *Ui, label: []const u8, tone: Tone, comptime fmt: []const u8, args: anytype) void {
+    if (ui.card_n == ui.card.len) return;
+    const row = &ui.card[ui.card_n];
+    ui.card_n += 1;
+    row.* = .{ .tone = tone };
+    setText(row.label[0..], label);
+    var w = std.Io.Writer.fixed(row.value[0..]);
+    w.print(fmt, args) catch {};
+}
+
+/// Fills a sentinel-terminated buffer from a slice. The sentinel sits one
+/// past the end of what `arr[0..]` covers, so a value that fills the buffer
+/// exactly is still terminated.
+fn setText(dst: []u8, text: []const u8) void {
+    const n = @min(text.len, dst.len);
+    @memcpy(dst[0..n], text[0..n]);
+    @memset(dst[n..], 0);
+}
+
 fn copyPath(dst: anytype, src: [*:0]const u8) [:0]const u8 {
     const text = std.mem.span(src);
     const n = @min(text.len, dst.len - 1);
@@ -429,6 +482,11 @@ const fg = rl.Color{ .r = 230, .g = 230, .b = 230, .a = 255 };
 const dim = rl.Color{ .r = 140, .g = 140, .b = 140, .a = 255 };
 const hilite = rl.Color{ .r = 255, .g = 210, .b = 60, .a = 255 };
 const bad = rl.Color{ .r = 255, .g = 90, .b = 90, .a = 255 };
+const good = rl.Color{ .r = 110, .g = 230, .b = 130, .a = 255 };
+/// The cartridge card: a dark cabinet panel, and the near-black the game's
+/// name is stencilled onto its lit marquee in.
+const panel = rl.Color{ .r = 12, .g = 12, .b = 24, .a = 235 };
+const ink = rl.Color{ .r = 20, .g = 16, .b = 0, .a = 255 };
 
 /// Text size follows the window so the menu is readable at 1x (a 256-pixel
 /// window) and not comical at 4x or fullscreen.
@@ -518,6 +576,52 @@ pub fn draw(ui: *const Ui, cfg: *const Config) void {
             else => if (selected) hilite else fg,
         };
         rl.DrawText(value, rl.GetScreenWidth() - fs - rl.MeasureText(value, fs), y, fs, color);
+    }
+    // Last, so the selection bar runs under the card rather than over it.
+    if (ui.page == .root) drawCartridge(ui);
+}
+
+/// The right half of the root page: what the cartridge says about itself, as
+/// a cabinet would put it — a lit marquee with the game's name, and a
+/// scoreboard of readings under it. The root page's rows are all labels with
+/// no values, so the whole column is free.
+fn drawCartridge(ui: *const Ui) void {
+    if (ui.card_n == 0) return;
+    const fs = fontSize();
+    const small = @max(10, @divTrunc(fs * 3, 4));
+    const pad = half(small);
+    const marquee = rowHeight() + pad;
+
+    const x = half(rl.GetScreenWidth());
+    const y = topY() - pad;
+    const w = rl.GetScreenWidth() - x - fs;
+    const h = marquee + pad + rowHeight() * @as(c_int, @intCast(ui.card_n + 1));
+
+    // Nothing is allowed out of the cabinet: a long title is cut off at the
+    // edge of the panel rather than drawn across the menu.
+    rl.BeginScissorMode(x, y, w, h);
+    defer rl.EndScissorMode();
+
+    rl.DrawRectangle(x, y, w, h, panel);
+    rl.DrawRectangle(x, y, w, marquee, hilite);
+    rl.DrawText(&ui.card_title, x + pad, y + half(marquee - fs), fs, ink);
+    rl.DrawRectangleLines(x, y, w, h, hilite);
+
+    var line = y + marquee + pad;
+    rl.DrawText(&ui.card_sub, x + pad, line, small, dim);
+    line += rowHeight();
+
+    for (ui.card[0..ui.card_n]) |*row| {
+        rl.DrawText(&row.label, x + pad, line, small, dim);
+        // Values hang off the right edge like a score, which lines them up
+        // without the font having to be fixed-width. It is not.
+        const width = rl.MeasureText(&row.value, small);
+        rl.DrawText(&row.value, x + w - pad - width, line, small, switch (row.tone) {
+            .plain => fg,
+            .good => good,
+            .bad => bad,
+        });
+        line += rowHeight();
     }
 }
 
@@ -647,6 +751,28 @@ test "a slot says whether it holds anything, and how old it is" {
     try std.testing.expectEqualStrings("Quick", ui.items()[quick_slot].label);
     try std.testing.expectEqualStrings("2m ago", valueText(ui.items()[quick_slot].act, &cfg, &ui, &buf).?);
     try std.testing.expectEqualStrings("empty", valueText(ui.items()[0].act, &cfg, &ui, &buf).?);
+}
+
+test "the cartridge card holds what fits and cuts the rest" {
+    var ui = Ui{};
+    cardStart(&ui, "SONIC THE HEDGEHOG", "(C)SEGA 1991.APR");
+    try std.testing.expectEqualStrings("SONIC THE HEDGEHOG", std.mem.sliceTo(&ui.card_title, 0));
+    try std.testing.expectEqualStrings("(C)SEGA 1991.APR", std.mem.sliceTo(&ui.card_sub, 0));
+
+    cardRow(&ui, "SERIAL", .plain, "{s}", .{"GM 00001009-00"});
+    try std.testing.expectEqual(@as(usize, 1), ui.card_n);
+    try std.testing.expectEqualStrings("GM 00001009-00", std.mem.sliceTo(&ui.card[0].value, 0));
+
+    // A value too long for the row is cut, not dropped.
+    cardRow(&ui, "FILE", .bad, "{s}", .{"a" ** 80});
+    try std.testing.expectEqual(ui.card[1].value.len, std.mem.sliceTo(&ui.card[1].value, 0).len);
+    try std.testing.expectEqual(Tone.bad, ui.card[1].tone);
+
+    // The card never grows past the rows it has, and starting over empties it.
+    for (0..card_rows * 2) |_| cardRow(&ui, "X", .plain, "y", .{});
+    try std.testing.expectEqual(card_rows, ui.card_n);
+    cardStart(&ui, "", "");
+    try std.testing.expectEqual(@as(usize, 0), ui.card_n);
 }
 
 test "every action has a row on the keys page" {

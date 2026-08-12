@@ -131,6 +131,87 @@ fn rd32(mem: []const u8, addr: usize) u32 {
     return std.mem.readInt(u32, mem[addr..][0..4], .big);
 }
 
+// ------------------------------------------------------------------- info
+
+/// The rest of the header, at $100: what the pause menu says about the game
+/// that is in. Every text field is fixed-width and space-padded, so trimming
+/// is all the parsing there is. The slices point into `rom`.
+pub const Info = struct {
+    title: []const u8 = "",
+    copyright: []const u8 = "",
+    serial: []const u8 = "",
+    /// The peripherals the game claims to work with, one letter each: `J` a
+    /// joypad, `6` a six-button one, `M` a mouse, and so on.
+    devices: []const u8 = "",
+    region: []const u8 = "",
+    /// What the header claims, and what the ROM actually adds up to. They
+    /// disagree for a bad dump, and for one with a copier header still on it.
+    checksum: u16 = 0,
+    computed: u16 = 0,
+
+    pub fn checksumOk(i: Info) bool {
+        return i.checksum == i.computed;
+    }
+};
+
+const header_end = 0x200;
+const copyright_at = 0x110;
+const copyright_len = 0x10;
+const domestic_at = 0x120;
+const overseas_at = 0x150;
+const title_len = 0x30;
+const serial_at = 0x180;
+const serial_len = 0x0E;
+const checksum_at = 0x18E;
+const devices_at = 0x190;
+const devices_len = 0x10;
+const region_at = 0x1F0;
+const region_len = 3;
+
+pub fn info(rom: []const u8) Info {
+    if (rom.len < header_end) return .{};
+    // The overseas title is the one in Latin letters; the domestic one is
+    // Shift-JIS on a Japanese cart, but it is all a Japan-only release has.
+    const overseas = field(rom, overseas_at, title_len);
+    return .{
+        .title = if (overseas.len != 0) overseas else field(rom, domestic_at, title_len),
+        .copyright = field(rom, copyright_at, copyright_len),
+        .serial = field(rom, serial_at, serial_len),
+        .devices = field(rom, devices_at, devices_len),
+        .region = field(rom, region_at, region_len),
+        .checksum = std.mem.readInt(u16, rom[checksum_at..][0..2], .big),
+        .computed = checksumOf(rom),
+    };
+}
+
+fn field(rom: []const u8, at: usize, len: usize) []const u8 {
+    return std.mem.trim(u8, rom[at..][0..len], " \x00");
+}
+
+/// Titles are laid out to fill their field — "SONIC THE     HEDGEHOG" — so
+/// the runs of spaces inside one get squeezed back down to a single space
+/// before anything tries to fit it in a column.
+pub fn squeezed(buf: []u8, text: []const u8) []const u8 {
+    var n: usize = 0;
+    for (text) |ch| {
+        if (ch == ' ' and (n == 0 or buf[n - 1] == ' ')) continue;
+        if (n == buf.len) break;
+        buf[n] = ch;
+        n += 1;
+    }
+    return buf[0..n];
+}
+
+/// Every word from $200 to the end of the ROM, added up and left to wrap:
+/// the sum the header at $18E is supposed to match. An odd trailing byte is
+/// not part of a word, and so is not part of the sum.
+fn checksumOf(rom: []const u8) u16 {
+    var sum: u16 = 0;
+    var i: usize = header_end;
+    while (i + 1 < rom.len) : (i += 2) sum +%= std.mem.readInt(u16, rom[i..][0..2], .big);
+    return sum;
+}
+
 // ------------------------------------------------------------------- tests
 
 const testing = std.testing;
@@ -195,6 +276,42 @@ test "a word access to SRAM carries both of its bytes" {
     c.write16(0x20_1000, 0xBEEF);
     try testing.expectEqual(@as(u16, 0xBEEF), c.read16(rom, 0x20_1000));
     try testing.expectEqual(@as(u8, 0xEF), c.read8(rom, 0x20_1001));
+}
+
+test "the header names the game, and its checksum can be checked against the ROM" {
+    var buf: [0x400]u8 = @splat(0);
+    @memcpy(buf[overseas_at..][0.."SONIC".len], "SONIC");
+    @memcpy(buf[serial_at..][0..serial_len], "GM 00001051-00");
+    @memcpy(buf[region_at..][0..region_len], "JUE");
+    @memcpy(buf[devices_at..][0..2], "J6");
+
+    var i = info(&buf);
+    try testing.expectEqualStrings("SONIC", i.title);
+    try testing.expectEqualStrings("GM 00001051-00", i.serial);
+    try testing.expectEqualStrings("JUE", i.region);
+    try testing.expectEqualStrings("J6", i.devices);
+    // Nothing but zeros past $200, and a header claiming zero: a match.
+    try testing.expect(i.checksumOk());
+
+    std.mem.writeInt(u16, buf[header_end..][0..2], 0x1234, .big);
+    i = info(&buf);
+    try testing.expectEqual(@as(u16, 0x1234), i.computed);
+    try testing.expect(!i.checksumOk());
+    // The header itself is never part of its own sum.
+    std.mem.writeInt(u16, buf[copyright_at..][0..2], 0xFFFF, .big);
+    try testing.expectEqual(@as(u16, 0x1234), info(&buf).computed);
+
+    // A Japan-only cart fills in only the domestic title.
+    @memset(buf[overseas_at..][0..title_len], ' ');
+    @memcpy(buf[domestic_at..][0.."SNC1".len], "SNC1");
+    try testing.expectEqualStrings("SNC1", info(&buf).title);
+    // Too short to hold a header: nothing to say, rather than a crash.
+    try testing.expectEqualStrings("", info(buf[0..0x100]).title);
+
+    var squeeze: [32]u8 = undefined;
+    try testing.expectEqualStrings("SONIC THE HEDGEHOG", squeezed(&squeeze, "SONIC THE     HEDGEHOG"));
+    // A title longer than the column it goes in is cut, not written past.
+    try testing.expectEqualStrings("A B C D", squeezed(squeeze[0..7], "A  B  C  D  E"));
 }
 
 test "the $A130F3 mapper swaps 512 KiB pages under the top seven slots" {

@@ -225,7 +225,12 @@ One window, simple design, no toolbar clutter. States:
   submenu) / Load State (slot submenu) / Options (keys, video, audio,
   region) / Reset / Quit. Keyboard and mouse navigable. No custom widget
   library; raylib primitives are enough, and raygui is an acceptable single
-  dependency if plain primitives get tedious.
+  dependency if plain primitives get tedious. The root page's right half is
+  the cartridge card, drawn as a cabinet would put it: the game's name on a
+  lit marquee, and a scoreboard of what the header at $100 says (copyright,
+  serial, region against the timing being run, devices, size, backup RAM,
+  and whether the checksum matches the ROM — green or red). Nothing here is
+  looked up anywhere: every reading comes out of the cartridge itself.
 
 Key configuration UI: pick an action, press a key, it rebinds; Escape
 cancels; conflicts are highlighted. Bindings live in the config file.
