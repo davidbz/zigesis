@@ -13,40 +13,6 @@ small desktop frontend. Full scope, architecture, and engineering standards
 are documented in [`DESIGN.md`](DESIGN.md); this file covers what a
 contributor or user needs to build, test, and run it.
 
-## Status
-
-In active development, milestone by milestone (see `DESIGN.md` section 9
-for the full plan and acceptance criteria):
-
-- **M0 — Project scaffold and regression harness: done.** Memory map, VDP
-  (VRAM/CRAM/VSRAM, DMA, per-scanline rendering), controller input,
-  interrupts, headless `--shot` mode, and the frame-hash regression test.
-- **M1 — Z80 core and bus integration: done.** A from-scratch Z80 core,
-  exact on the full SingleStepTests/z80 conformance corpus, wired into the
-  machine with real BUSREQ/RESET semantics and the banked 68k-bus window.
-- **M2 — PSG and the audio pipeline: done.** A from-scratch SN76489 core, a
-  resampling mixer and ring buffer with no allocation and no raylib import,
-  and a raylib `AudioStream` frontend paced by the ring's fill level rather
-  than a fixed target FPS. PSG sound effects and percussion are audible.
-- **M3 — YM2612: done.** A from-scratch six-channel four-operator FM core
-  (envelope generator with SSG-EG, all eight algorithms, LFO, timers,
-  channel 6 DAC, panning, the analogue ladder, per-channel mute), verified
-  sample by sample against Nuked-OPN2: exact on operators, detune, LFO,
-  panning and DAC, within 0.04% on the algorithms, within 0.14 dB on
-  envelope sweeps. Music and DAC drums play.
-- **M4 — VDP completion: done.** Ports first: a real FIFO driving the status
-  bits, DMA metered off the access-slot budget, the full read-target matrix,
-  the HV counter latch, VSRAM caching. Then rendering: H32, shadow/highlight,
-  both interlace modes, per-line sprite and pixel limits with X=0 masking, and
-  PAL V30 timing. VDPFIFOTesting scores 111 of 122 (see `DESIGN.md` section 9).
-- **M5 — Frontend shell: done.** Idle snow screen, ROM loading by
-  drag-and-drop, built-in file browser or command line, a keyboard- and
-  mouse-driven menu, rebindable keys for both pads and every hotkey, window
-  scale and fullscreen, pause and reset, region auto-detection, and a
-  plain-text config file that survives a restart.
-- **M6 and later** (save states, debug tooling, compatibility pass) are not
-  started.
-
 ## Requirements
 
 - [Zig](https://ziglang.org/) 0.16.0 (see `build.zig.zon`).
