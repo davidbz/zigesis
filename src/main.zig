@@ -148,10 +148,11 @@ fn windowW(scale: u8) c_int {
 
 /// The picture plus the status bar under it. `shell.barHeight` derives itself
 /// from the window rather than the scale, so this only has to leave it about
-/// the right room: a tenth of the picture is what it comes out at.
+/// the right room.
 fn windowH(scale: u8) c_int {
+    const bar_share = 10; // what `shell.barHeight` comes out at, as a fraction
     const picture = vdp.height_v28 * @as(c_int, scale);
-    return picture + @divTrunc(picture, 10);
+    return picture + @divTrunc(picture, bar_share);
 }
 
 fn keyDown(key: u32) bool {
@@ -239,7 +240,7 @@ fn flushSram(io: std.Io, g: *Genesis, rom_path: []const u8) !void {
 /// game plays.
 fn describeRom(ui: *shell.Ui, g: *const Genesis, rom: []const u8, rom_path: []const u8) void {
     const info = cart.info(rom);
-    var title_buf: [48]u8 = undefined;
+    var title_buf: [shell.max_card_title]u8 = undefined;
     shell.cardStart(
         ui,
         // Homebrew and bad dumps leave the title blank; the filename is then
@@ -440,7 +441,12 @@ pub fn main(init: std.process.Init) !void {
     if (pal_arg) cfg.region = .pal;
     if (rom) |image| startMachine(g, &c, image, cfg, opts);
 
-    try windowed(io, gpa, g, &c, &cfg, cfg_path, opts, &rom, path, replay_path, record_path);
+    try windowed(io, gpa, g, &c, &cfg, opts, &rom, .{
+        .config = cfg_path,
+        .rom = path,
+        .replay = replay_path,
+        .record = record_path,
+    });
 }
 
 const HeadlessArgs = struct {
@@ -510,7 +516,7 @@ fn headless(
     });
     defer rl.UnloadImage(shot);
     _ = rl.ExportImage(shot, shot_path.ptr);
-    report(g, c, frames);
+    report(c, frames);
 }
 
 fn fbImage(g: *Genesis) rl.Image {
@@ -523,12 +529,18 @@ fn fbImage(g: *Genesis) rl.Image {
     };
 }
 
-fn report(g: *const Genesis, c: *const Cpu, frames: u32) void {
-    _ = g;
+fn report(c: *const Cpu, frames: u32) void {
     std.debug.print("{d} frames, {d} cycles ({d:.2}s emulated), pc={x:0>6} sr={x:0>4} halted={}\n", .{
         frames, c.cycles, @as(f64, @floatFromInt(c.cycles)) / scheduler.cpu_hz, c.pc, c.sr.toInt(), c.halted,
     });
 }
+
+const WindowedArgs = struct {
+    config: []const u8,
+    rom: ?[]const u8,
+    replay: ?[]const u8,
+    record: ?[]const u8,
+};
 
 /// The window, the frame loop, and the shell: idle snow with no cartridge,
 /// the picture with one, and the menu over either.
@@ -538,18 +550,15 @@ fn windowed(
     g: *Genesis,
     c: *Cpu,
     cfg: *Config,
-    cfg_path: []const u8,
     opts: Opts,
     rom: *?[]u8,
-    rom_path: ?[]const u8,
-    replay_path: ?[]const u8,
-    record_path: ?[]const u8,
+    args: WindowedArgs,
 ) !void {
-    const replay: ?Replay = if (replay_path) |p| .{
+    const replay: ?Replay = if (args.replay) |p| .{
         .log = try std.Io.Dir.cwd().readFileAlloc(io, p, gpa, .limited(max_replay_bytes)),
     } else null;
     defer if (replay) |r| gpa.free(r.log);
-    var record: ?std.ArrayList(u8) = if (record_path == null) null else .empty;
+    var record: ?std.ArrayList(u8) = if (args.record == null) null else .empty;
     defer if (record) |*r| r.deinit(gpa);
 
     rl.InitWindow(windowW(cfg.scale), windowH(cfg.scale), "zigesis — Genesis");
@@ -589,7 +598,7 @@ fn windowed(
     // Where this ROM's own files go. It outlives the `Request.load` slice it
     // is copied from, which points into the shell's own buffer.
     var path_buf: [shell.max_path]u8 = undefined;
-    var path: ?[]const u8 = if (rom_path) |p| keepPath(&path_buf, p) else null;
+    var path: ?[]const u8 = if (args.rom) |p| keepPath(&path_buf, p) else null;
     if (path) |p| loadSram(io, g, p);
 
     var ui = shell.Ui{};
@@ -631,14 +640,14 @@ fn windowed(
                 frames = 0;
             },
             .save_state => |slot| if (path) |p| {
-                var name: [16]u8 = undefined;
+                var name: [shell.max_slot_name]u8 = undefined;
                 if (saveState(io, g, c, p, slot)) {
                     ui.status("saved {s}", .{shell.slotName(slot, &name)});
                 } else |err| ui.status("cannot save {s}: {t}", .{ shell.slotName(slot, &name), err });
                 ui.stamps_dirty = true;
             },
             .load_state => |slot| if (path) |p| {
-                var name: [16]u8 = undefined;
+                var name: [shell.max_slot_name]u8 = undefined;
                 if (loadState(io, gpa, g, c, p, slot)) {
                     ui.status("loaded {s}", .{shell.slotName(slot, &name)});
                 } else |err| ui.status("cannot load {s}: {t}", .{ shell.slotName(slot, &name), err });
@@ -650,7 +659,7 @@ fn windowed(
         ui.now = nowSeconds(io);
         if (ui.stamps_dirty) refreshStamps(io, &ui, path);
         if (ui.dirty) {
-            saveConfig(io, cfg_path, cfg.*) catch |err| ui.status("cannot save options: {t}", .{err});
+            saveConfig(io, args.config, cfg.*) catch |err| ui.status("cannot save options: {t}", .{err});
             ui.dirty = false;
         }
         if (cfg.fullscreen != applied_fullscreen) {
@@ -711,10 +720,10 @@ fn windowed(
 
     if (path) |p| flushSram(io, g, p) catch |err| std.debug.print("cannot save SRAM: {t}\n", .{err});
     if (record) |*r| {
-        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = record_path.?, .data = r.items });
-        std.debug.print("recorded {d} frames of input to {s}\n", .{ r.items.len, record_path.? });
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args.record.?, .data = r.items });
+        std.debug.print("recorded {d} frames of input to {s}\n", .{ r.items.len, args.record.? });
     }
-    report(g, c, frames);
+    report(c, frames);
 }
 
 /// The window is a TV: whatever the source is putting out gets stretched to

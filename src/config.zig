@@ -65,7 +65,7 @@ pub const Config = struct {
         try w.print("region = {s}\n", .{@tagName(cfg.region)});
         try w.print("audio = {}\n", .{cfg.audio});
         try w.print("volume = {d}\n", .{cfg.volume});
-        var buf: [16]u8 = undefined;
+        var buf: [input.max_key_name]u8 = undefined;
         for (std.enums.values(input.Action)) |action| {
             const key = cfg.keys[@intFromEnum(action)];
             try w.print("key.{s} = {s}\n", .{ @tagName(action), input.keyName(key, &buf) });

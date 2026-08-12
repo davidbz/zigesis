@@ -188,6 +188,10 @@ const named = [_]struct { []const u8, u32 }{
     .{ "RALT", 346 },
 };
 
+/// Enough for every name in the table and for the decimal fallback an
+/// unnamed code round-trips as, which is what `keyName` needs a buffer for.
+pub const max_key_name = 16;
+
 /// Writes the key's name into `buf` and returns it. Printable codes are
 /// their own name, so `A` is "A" and `[` is "[".
 pub fn keyName(key: u32, buf: []u8) []const u8 {
@@ -231,8 +235,9 @@ test "bindings turn held keys into a pad byte, per pad" {
     try std.testing.expectEqual(genesis.btn_a | genesis.btn_up, buttons(b, 0, &held));
 }
 
-test "every key name round-trips" {
-    var buf: [16]u8 = undefined;
+test "every key name round-trips, and fits the buffer they are written to" {
+    var buf: [max_key_name]u8 = undefined;
+    for (named) |n| try std.testing.expect(n[0].len <= max_key_name);
     for (defaults) |key| {
         try std.testing.expectEqual(key, keyCode(keyName(key, &buf)).?);
     }
