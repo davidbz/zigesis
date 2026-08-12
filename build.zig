@@ -54,6 +54,26 @@ pub fn build(b: *std.Build) void {
             .{ .name = "audio", .module = audio },
         },
     });
+    // Frontend data modules: bindings, options, and the idle screen's pixels.
+    // Still no raylib — only `main.zig` and `ui/shell.zig` draw anything.
+    const input = b.addModule("input", .{
+        .root_source_file = b.path("src/input.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "genesis", .module = genesis }},
+    });
+    const cfg = b.addModule("config", .{
+        .root_source_file = b.path("src/config.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "input", .module = input }},
+    });
+    const snow = b.addModule("snow", .{
+        .root_source_file = b.path("src/ui/snow.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const scheduler = b.addModule("scheduler", .{
         .root_source_file = b.path("src/scheduler.zig"),
         .target = target,
@@ -99,6 +119,18 @@ pub fn build(b: *std.Build) void {
     const scheduler_tests = b.addTest(.{ .root_module = scheduler });
     test_step.dependOn(&b.addRunArtifact(scheduler_tests).step);
     check_step.dependOn(&scheduler_tests.step);
+
+    const input_tests = b.addTest(.{ .root_module = input });
+    test_step.dependOn(&b.addRunArtifact(input_tests).step);
+    check_step.dependOn(&input_tests.step);
+
+    const config_tests = b.addTest(.{ .root_module = cfg });
+    test_step.dependOn(&b.addRunArtifact(config_tests).step);
+    check_step.dependOn(&config_tests.step);
+
+    const snow_tests = b.addTest(.{ .root_module = snow });
+    test_step.dependOn(&b.addRunArtifact(snow_tests).step);
+    check_step.dependOn(&snow_tests.step);
 
     // The headless frame-hash regression suite: no raylib in its import
     // graph, so it can run anywhere `zig build test` runs.
@@ -224,9 +256,31 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "scheduler", .module = scheduler },
                     .{ .name = "vdp", .module = vdp },
                     .{ .name = "audio", .module = audio },
+                    .{ .name = "config", .module = cfg },
+                    .{ .name = "input", .module = input },
+                    .{ .name = "snow", .module = snow },
                 },
             }),
         });
+        // The menu's arithmetic is testable without a window; the drawing is
+        // not. This links raylib because `shell.zig` imports its header, and
+        // runs nothing that needs a display.
+        const shell = b.createModule(.{
+            .root_source_file = b.path("src/ui/shell.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "config", .module = cfg },
+                .{ .name = "input", .module = input },
+            },
+        });
+        shell.linkLibrary(raylib_dep.artifact("raylib"));
+        const shell_tests = b.addTest(.{ .root_module = shell });
+        if (target.result.os.tag == .linux) shell_tests.use_lld = false;
+        test_step.dependOn(&b.addRunArtifact(shell_tests).step);
+        check_step.dependOn(&shell_tests.step);
+
         zigesis.root_module.linkLibrary(raylib_dep.artifact("raylib"));
         // ponytail: zig folds raylib's system libs (libGL.so, libX11.so, ...)
         // into libraylib.a as archive members (ziglang/zig#20476). LLD warns

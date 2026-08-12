@@ -214,7 +214,8 @@ One window, simple design, no toolbar clutter. States:
   dead channel. Implementation: refill a small noise texture each frame from
   a fast PRNG (xoshiro or similar), greyscale, subtle horizontal banding and
   a faint rolling bar for flavor; optional low-volume white noise once audio
-  exists. Center a single line of text: "Drop a ROM or press O". The snow is
+  exists. Center a single line of text: "Press any key", which opens the
+  menu — dropping a ROM on the window works too. The snow is
   the identity of the app; make it look good but keep it under ~50 lines of
   code.
 - Running: the emulated framebuffer, integer-scaled, letterboxed on aspect
@@ -664,7 +665,7 @@ Ceilings worth naming, all in `vdp.zig`:
 - Sprites are fetched for the line being drawn, not the line ahead, so a
   sprite table written mid-line takes effect a line early.
 
-### M5: Frontend shell
+### M5: Frontend shell — done 2026-08-12
 
 Deliverables: idle snow screen; ROM loading via drag-and-drop, dialog, and
 CLI; menu system of section 5.2; key rebinding UI; config persistence;
@@ -672,6 +673,84 @@ window scale/fullscreen; pause/reset.
 Acceptance: every option in section 5.1 "required" except save states is
 reachable from the menu, works, and survives restart via the config file;
 the snow idles at negligible CPU.
+
+Four files, and the split between them is the build graph's rule from §4
+rather than taste: `input.zig` (what a key means), `config.zig` (what the
+file says), and `ui/snow.zig` (pixels in an array) are data modules with no
+path to raylib, and `ui/shell.zig` is the only file besides `main.zig` that
+includes `raylib.h`. Two `@cImport`s of the same header inside one module
+agree on their types, so no wrapper file was needed.
+
+**Bindings.** `input.Action` is one enum covering both pads and every hotkey,
+with the sixteen pad buttons first in `Genesis.buttons` bit order so
+`padMask` is a shift and pad *n*'s bindings are the eight entries at
+`n * pad_count`. `input.buttons(keys, pad, down)` takes the host keyboard as
+a function pointer, which is what keeps the window out of the file. Pad 2
+ships unbound — two players on one keyboard is a choice, not a default — and
+an unbound key reads as never held, so the second port answers "nothing
+pressed" until someone binds it. The genesis side grew the port to match:
+`buttons2`/`pad2_ctrl`/`pad2_data`, `$A10005`/`$A1000B`, and one shared
+`padByte` decoder for both ports, with the third port left reading as empty.
+
+**The config file** is `key = value` text at
+`$XDG_CONFIG_HOME/zigesis/config.ini` (then `$HOME/.config`, then `%APPDATA%`,
+then next to the exe), written on every change the menu makes and written
+once at first launch so there is something to hand-edit. Bindings go out as
+names (`UP`, `F11`, `NONE`) via a table that round-trips, with unnamed codes
+falling back to decimal: ugly in the file, never wrong. Unknown keys are
+ignored and values clamped, but a file whose `version` line is missing or not
+ours is ignored *whole* — these are settings, and defaults are a fine answer.
+The headless path deliberately never reads it, so a regression run cannot be
+perturbed by someone's volume setting.
+
+**Menu.** Raylib primitives, no widget library: a static `Item` table per
+page, `update` mutating the `Config` in place and handing back what it cannot
+do itself (`load`, `reset`, `quit`) as a `Request`. Keyboard and mouse both
+work, hover only moves the selection when the mouse actually moved (a pointer
+lying over the list otherwise fights the arrow keys), and the font and row
+height derive from `GetScreenHeight()` so the menu is legible at 1x and not
+comical fullscreen. Long pages scroll, which the keys page needs: 22 rows.
+
+**Load ROM is a file browser, not a system dialog.** Raylib has none, and a
+native one is a dependency per platform for one button; the browser is
+raylib's own `LoadDirectoryFiles` filtered to ROM extensions, directories
+first, with a `..` row, reusing the menu's list rendering. Drag-and-drop and
+the CLI argument reach the same `startMachine`.
+
+**Region** is auto/NTSC/PAL, and `auto` reads the cartridge header's field at
+`$1F0`, which has two encodings in the wild (the letters `JUE` or a single
+hex-digit bitmask; `E` is ambiguous between them and is read as the letter).
+Changing region resets, because timing is chosen when the machine starts and
+running on at the old rate would be a lie.
+
+**Pacing.** A running game is still paced by the audio ring (§7); idle,
+paused, and no-audio-device frames have nothing draining the mixer, so
+`SetTargetFPS` takes over. The snow is a 160x120 texture stretched over
+whatever the window is, so its cost does not grow with the window: 60,000
+frames of `Snow.step` in 0.450 s ReleaseFast, 7.5 µs a frame, about 0.05% of
+one core at 60 fps. The rest of an idle frame is one texture upload and one
+quad.
+
+Tested: the pad bit order against `genesis.btn_*`, held keys to pad byte for
+both pads, every key name's round trip, conflicting bindings, config
+write-then-parse identity, junk and foreign files, the header's region field
+in both encodings, the second port and the empty third, list scrolling,
+value clamping and region wrap, and that every action has a row on the keys
+page. 111 tests green.
+
+Ceilings, and one thing that cannot be checked here:
+
+- The devcontainer has X sockets but no authorisation and no screenshot
+  tool, so the window path exits through its `NoDisplay` guard. Everything
+  above the drawing calls is unit-tested; the drawing itself was not seen
+  running in this environment. Config persistence *was* verified end to end
+  by running the binary with `XDG_CONFIG_HOME` pointed at a scratch dir.
+- Escape cancels a rebind and backs out of every page, so Escape is not
+  bindable. That is the price of it always being the way out.
+- Rebinding takes the next key with no conflict check; the keys page paints
+  a duplicate red and leaves it, since a deliberate double-bind is legal.
+- Save states are M6, so Save State and Load State are not on the root menu
+  yet — §5.2's tree lists them and this ships the other five entries.
 
 ### M6: Save states and cartridge persistence
 
