@@ -38,7 +38,24 @@ pub const Request = union(enum) {
     load_state: u8,
 };
 
-const Page = enum { root, load, options, video, audio, keys, save_slots, load_slots };
+const Page = enum {
+    root,
+    load,
+    options,
+    video,
+    audio,
+    keys,
+    save_slots,
+    load_slots,
+
+    /// Where a page's Back row goes, and where Escape backs out to.
+    fn parent(p: Page) Page {
+        return switch (p) {
+            .video, .audio, .keys => .options,
+            else => .root,
+        };
+    }
+};
 
 const Act = union(enum) {
     goto: Page,
@@ -124,6 +141,10 @@ const key_items = blk: {
     break :blk items;
 };
 
+/// How much of a cartridge title the card holds, which is also how much of one
+/// `main.zig` bothers to squeeze out of the header.
+pub const max_card_title = 48;
+
 pub const Ui = struct {
     open: bool = false,
     paused: bool = false,
@@ -150,7 +171,7 @@ pub const Ui = struct {
     /// The cartridge card on the root page: `main.zig` fills it in when a ROM
     /// goes in, because none of it changes while the game plays. `card_n` of
     /// zero means there is no cartridge and nothing to draw.
-    card_title: [48:0]u8 = @splat(0),
+    card_title: [max_card_title:0]u8 = @splat(0),
     card_sub: [24:0]u8 = @splat(0),
     card: [card_rows]Row = @splat(.{}),
     card_n: usize = 0,
@@ -208,30 +229,37 @@ fn hotkeys(ui: *Ui, cfg: *Config, has_rom: bool) Request {
     if (pressed(cfg, .menu)) {
         ui.open = true;
         ui.goto(.root);
-    } else if (pressed(cfg, .open)) {
+        return .none;
+    }
+    if (pressed(cfg, .open)) {
         ui.open = true;
         ui.goto(.load);
         ui.browser.reload();
-    } else if (pressed(cfg, .pause)) {
+        return .none;
+    }
+    if (pressed(cfg, .pause)) {
         ui.paused = !ui.paused;
-    } else if (pressed(cfg, .fullscreen)) {
+        return .none;
+    }
+    if (pressed(cfg, .fullscreen)) {
         cfg.fullscreen = !cfg.fullscreen;
         ui.dirty = true;
-    } else if (pressed(cfg, .reset)) {
-        return .reset;
-    } else if (pressed(cfg, .next_slot)) {
+        return .none;
+    }
+    if (pressed(cfg, .reset)) return .reset;
+    if (pressed(cfg, .next_slot)) {
         ui.slot = (ui.slot + 1) % slots;
         ui.status("state slot {d}", .{ui.slot});
-    } else if (has_rom and pressed(cfg, .save_state)) {
-        return .{ .save_state = ui.slot };
-    } else if (has_rom and pressed(cfg, .load_state)) {
-        return .{ .load_state = ui.slot };
-    } else if (has_rom and pressed(cfg, .quick_save)) {
-        return .{ .save_state = quick_slot };
-    } else if (has_rom and pressed(cfg, .quick_load)) {
-        return .{ .load_state = quick_slot };
-    } else if (!has_rom and rl.GetKeyPressed() != 0) {
-        // The idle screen asks for any key; the menu is what any key gets.
+        return .none;
+    }
+    if (has_rom) {
+        if (pressed(cfg, .save_state)) return .{ .save_state = ui.slot };
+        if (pressed(cfg, .load_state)) return .{ .load_state = ui.slot };
+        if (pressed(cfg, .quick_save)) return .{ .save_state = quick_slot };
+        if (pressed(cfg, .quick_load)) return .{ .load_state = quick_slot };
+    }
+    // The idle screen asks for any key; the menu is what any key gets.
+    if (!has_rom and rl.GetKeyPressed() != 0) {
         ui.open = true;
         ui.goto(.root);
     }
@@ -278,7 +306,7 @@ fn menuKeys(ui: *Ui, cfg: *Config, has_rom: bool) Request {
             return .none;
         },
         .back => {
-            ui.goto(if (ui.page == .video or ui.page == .audio or ui.page == .keys) .options else .root);
+            ui.goto(ui.page.parent());
             return .none;
         },
         .close => {
@@ -497,10 +525,15 @@ const bar_bottom = rl.Color{ .r = 14, .g = 14, .b = 22, .a = 255 };
 const bar_rule = rl.Color{ .r = 78, .g = 82, .b = 110, .a = 255 };
 const chip = rl.Color{ .r = 48, .g = 50, .b = 66, .a = 255 };
 
-/// Text size follows the window so the menu is readable at 1x (a 256-pixel
-/// window) and not comical at 4x or fullscreen.
+/// Below this the default raylib font stops being legible at all, so a 1x
+/// window gets a menu that overflows rather than one that cannot be read.
+const min_font = 10;
+/// Rows of text the window is tall, which is what makes the menu readable at
+/// 1x (a 256-pixel window) and not comical at 4x or fullscreen.
+const font_rows = 22;
+
 fn fontSize() c_int {
-    return @max(10, @divTrunc(rl.GetScreenHeight(), 22));
+    return @max(min_font, @divTrunc(rl.GetScreenHeight(), font_rows));
 }
 
 fn half(v: c_int) c_int {
@@ -598,7 +631,7 @@ pub fn draw(ui: *const Ui, cfg: *const Config) void {
 fn drawCartridge(ui: *const Ui) void {
     if (ui.card_n == 0) return;
     const fs = fontSize();
-    const small = @max(10, @divTrunc(fs * 3, 4));
+    const small = @max(min_font, @divTrunc(fs * 3, 4));
     const pad = half(small);
     const marquee = rowHeight() + pad;
 
@@ -653,7 +686,7 @@ fn valueText(act: Act, cfg: *const Config, ui: *const Ui, buf: []u8) ?[:0]const 
         .volume => std.fmt.bufPrintZ(buf, "{d}%", .{cfg.volume}) catch null,
         .bind => |action| blk: {
             if (ui.rebind == action) break :blk "press a key...";
-            var name: [16]u8 = undefined;
+            var name: [input.max_key_name]u8 = undefined;
             break :blk std.fmt.bufPrintZ(buf, "{s}", .{input.keyName(cfg.keys[@intFromEnum(action)], &name)}) catch null;
         },
         .slot => |n| stampText(ui.stamps[n], ui.now, buf),
@@ -672,6 +705,9 @@ pub fn stampText(stamp: i64, now: i64, buf: []u8) ?[:0]const u8 {
     if (secs < 24 * 60 * 60) return std.fmt.bufPrintZ(buf, "{d}h ago", .{@divTrunc(secs, 60 * 60)}) catch null;
     return std.fmt.bufPrintZ(buf, "{d}d ago", .{@divTrunc(secs, 24 * 60 * 60)}) catch null;
 }
+
+/// Enough for the longest name below, which is "quicksave".
+pub const max_slot_name = "quicksave".len;
 
 /// How a slot is named in a status line. `main.zig` reports saves and loads
 /// there, and "quick" is what F6 wrote, not "slot 8".
@@ -725,11 +761,15 @@ fn held(pad: u8, action: Action) bool {
     return pad & action.padMask() != 0;
 }
 
+/// "QUICK " and two key names with a slash between them, plus the terminator:
+/// the longest the hint below can get however the two keys are bound.
+const quick_hint_buf = "QUICK /".len + 2 * input.max_key_name + 1;
+
 /// What the bar says about the quicksave: the two keys that drive it, so
 /// nobody has to open the menu to find out which they are.
-fn quickHint(cfg: *const Config, buf: []u8) [:0]const u8 {
-    var save: [16]u8 = undefined;
-    var load: [16]u8 = undefined;
+fn quickHint(cfg: *const Config, buf: *[quick_hint_buf]u8) [:0]const u8 {
+    var save: [input.max_key_name]u8 = undefined;
+    var load: [input.max_key_name]u8 = undefined;
     return std.fmt.bufPrintZ(buf, "QUICK {s}/{s}", .{
         input.keyName(cfg.keys[@intFromEnum(Action.quick_save)], &save),
         input.keyName(cfg.keys[@intFromEnum(Action.quick_load)], &load),
@@ -740,7 +780,7 @@ fn drawBar(ui: *const Ui, cfg: *const Config) void {
     const h = barHeight();
     const w = rl.GetScreenWidth();
     const y = rl.GetScreenHeight() - h;
-    const fs = @max(10, @divTrunc(h * 2, 5));
+    const fs = @max(min_font, @divTrunc(h * 2, 5));
     const gap = half(fs);
     const ty = y + half(h - fs);
 
@@ -763,7 +803,7 @@ fn drawBar(ui: *const Ui, cfg: *const Config) void {
     if (stampText(ui.stamps[quick_slot], ui.now, &age_buf)) |age| {
         right = barText(right, ty, fs, age, if (empty) dim else good);
     }
-    var keys: [32]u8 = undefined;
+    var keys: [quick_hint_buf]u8 = undefined;
     right = barText(right, ty, fs, quickHint(cfg, &keys), dim);
 
     const name_x = gap + drawPad(gap, y, h, ui.pad) + fs;
@@ -922,7 +962,7 @@ test "every pad button has a light on the bar, and only one" {
     try std.testing.expectEqual(@as(usize, 8), lights); // no bit drawn twice
 
     const cfg = Config{};
-    var buf: [32]u8 = undefined;
+    var buf: [quick_hint_buf]u8 = undefined;
     try std.testing.expectEqualStrings("QUICK F6/F7", quickHint(&cfg, &buf));
     try std.testing.expect(held(input.Action.start.padMask(), .start));
     try std.testing.expect(!held(input.Action.start.padMask(), .a));

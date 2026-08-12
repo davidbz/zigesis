@@ -446,14 +446,11 @@ pub const Genesis = struct {
     /// Nothing on the Genesis is wired to the Z80's IORQ pins; every chip a
     /// sound driver touches is memory-mapped instead.
     pub fn z80In(g: *Genesis, port: u16) u8 {
-        _ = g;
-        _ = port;
+        _ = .{ g, port };
         return 0xFF;
     }
     pub fn z80Out(g: *Genesis, port: u16, val: u8) void {
-        _ = g;
-        _ = port;
-        _ = val;
+        _ = .{ g, port, val };
     }
 };
 
