@@ -37,24 +37,31 @@ jobs:
           fi
 
   build:
-    name: Build / ${{ matrix.target }}
+    name: Build / ${{ matrix.artifact }}
     needs: verify-version
-    runs-on: ubuntu-latest   # Zig cross-compiles everything from Linux
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
+      # `zigflags` is empty for a native build. Cross-compiling needs zig's own
+      # libc, which means no system headers — fine for Windows, where the SDK
+      # libraries are stubbed in zig, and impossible for the other two: the
+      # Linux build needs X11/GL headers from apt and the macOS build needs the
+      # frameworks from Xcode, so each of those builds on its own runner.
       matrix:
         include:
-          - target: x86_64-linux-musl     # Static binary — runs on any x86_64 Linux
+          - os: ubuntu-24.04               # pinned: sets the glibc floor the notes promise
             artifact: zigesis-x86_64-linux
-          - target: aarch64-linux-musl    # Static binary — Raspberry Pi, AWS Graviton, etc.
-            artifact: zigesis-aarch64-linux
-          - target: x86_64-macos
-            artifact: zigesis-x86_64-macos
-          - target: aarch64-macos         # Apple Silicon
+            bin: zigesis
+            zigflags: ""
+          - os: ubuntu-latest              # cross-compiled: no Windows runner needed
+            artifact: zigesis-x86_64-windows
+            bin: zigesis.exe
+            zigflags: "-Dtarget=x86_64-windows-gnu"
+          - os: macos-latest               # Apple Silicon
             artifact: zigesis-aarch64-macos
-          # - target: x86_64-windows-gnu
-          #   artifact: zigesis-x86_64-windows.exe
+            bin: zigesis
+            zigflags: ""
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -65,20 +72,33 @@ jobs:
         with:
           version: "0.16.0"
 
-      - name: Build
-        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
-
-      # Normalise the binary name so the release page is clean.
-      - name: Stage artifact
+      - name: Install raylib build dependencies
+        if: matrix.artifact == 'zigesis-x86_64-linux'
         run: |
-          src="zig-out/bin/zigesis"
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libx11-dev libxrandr-dev \
+            libxinerama-dev libxcursor-dev libxi-dev libasound2-dev
+
+      - name: Build
+        run: zig build ${{ matrix.zigflags }} -Doptimize=ReleaseSafe
+
+      # Release assets carry no file mode, so the unix binaries ship in a
+      # tarball that keeps the executable bit — a bare download would land
+      # unrunnable. Windows has no such bit; zip is what it expects anyway.
+      - name: Package artifact
+        shell: bash
+        run: |
           mkdir -p dist
-          cp "$src" "dist/${{ matrix.artifact }}"
+          if [[ "${{ matrix.bin }}" == *.exe ]]; then
+            zip -9 -j "dist/${{ matrix.artifact }}.zip" "zig-out/bin/${{ matrix.bin }}"
+          else
+            tar -czf "dist/${{ matrix.artifact }}.tar.gz" -C zig-out/bin "${{ matrix.bin }}"
+          fi
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.*
           if-no-files-found: error
 
       # sbom-action's `path` input is always scanned as a directory source,
@@ -113,9 +133,11 @@ jobs:
       - name: Verify artifacts
         run: ls -lh artifacts/
 
+      # Globbed by prefix, not `*`: the shell would otherwise expand the
+      # freshly-truncated checksums.txt into its own checksum list.
       - name: Generate checksums
         working-directory: artifacts
-        run: sha256sum ./* > checksums.txt
+        run: sha256sum zigesis-* > checksums.txt
 
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
@@ -135,11 +157,35 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          # github.ref_name is the branch, not a tag, on workflow_dispatch.
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          tag="${{ github.ref_name }}"
-          [[ "$tag" == "" ]] && tag="${{ inputs.tag }}"
-          gh release create "$tag" \
+          cat > notes.md <<'EOF'
+          ### Downloads
+
+          | Platform | Asset |
+          | --- | --- |
+          | Linux x86_64 | `zigesis-x86_64-linux.tar.gz` |
+          | Windows x86_64 | `zigesis-x86_64-windows.zip` |
+          | macOS Apple Silicon | `zigesis-aarch64-macos.tar.gz` |
+
+          Verify before running:
+
+          ```
+          sha256sum --ignore-missing -c checksums.txt
+          cosign verify-blob --bundle checksums.txt.bundle \
+            --certificate-identity-regexp '^https://github.com/${{ github.repository }}/' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            checksums.txt
+          ```
+
+          The macOS build is unsigned: `xattr -d com.apple.quarantine zigesis`
+          after unpacking. The Linux build links libX11/libGL from the system
+          and needs glibc 2.39 or newer (Ubuntu 24.04+).
+          EOF
+          gh release create "$TAG" \
             --repo "${{ github.repository }}" \
-            --title "$tag" \
+            --title "$TAG" \
+            --notes-file notes.md \
             --generate-notes \
             artifacts/*
