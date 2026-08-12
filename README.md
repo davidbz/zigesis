@@ -115,11 +115,28 @@ resampled sound output against pinned hashes. Fetch the ROM once with
 `tools/fetch_test_roms.sh` (pinned to a release tag, into the gitignored
 `roms/`); the test skips cleanly when it is absent.
 
+### VDP conformance suite
+
 The same script also fetches [Nemesis' VDPFIFOTesting
 ROM](http://nemesis.hacking-cult.org/MegaDrive/Roms/Test/Mine/VDP/), the VDP
-conformance suite. It is not part of `zig build test` — it self-reports on
-screen, so it is run by hand and read from a screenshot. Where the VDP
-currently stands against it is tabulated in `DESIGN.md` section 9, M4.
+conformance suite:
+
+```
+zig build vdpfifo -Doptimize=ReleaseFast
+```
+
+The ROM self-reports on screen, so reading it used to mean walking 22 pages by
+hand and squinting at a PNG. It draws its text one tile per character from a
+font uploaded in ASCII order, which means a name table entry *is* the
+character: `test/vdpfifo.zig` boots the ROM headless, presses Start whenever
+the picture stops changing, and prints every page as text with its score. The
+run takes about 10,000 frames and a quarter of a minute.
+
+Each page's failure count is pinned in that file, so the step is a regression
+gate and not just a printer — it exits non-zero when a page's score moves in
+either direction. It is a separate step from `zig build test` because it wants
+a release build to be quick. Where the VDP stands, and why the remaining
+failures remain, is tabulated in `DESIGN.md` section 9, M4.
 
 ### YM2612 differential suite
 

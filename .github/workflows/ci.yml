@@ -106,3 +106,28 @@ jobs:
       # The z80-sst step pins its own ReleaseFast optimize mode in build.zig.
       - name: Run conformance suite
         run: zig build z80-sst
+
+  vdpfifo:
+    name: VDP conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: "0.16.0"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-vdpfifo-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            zig-vdpfifo-${{ runner.os }}-
+      - name: Fetch test ROM
+        shell: bash
+        run: tools/fetch_test_roms.sh
+      # Walks all 22 pages and fails when a page's score moves off the pin in
+      # test/vdpfifo.zig. ReleaseFast turns a few minutes into a few seconds.
+      - name: Run VDPFIFOTesting
+        run: zig build vdpfifo -Doptimize=ReleaseFast
