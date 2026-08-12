@@ -113,6 +113,7 @@ const io_data1: u24 = 0x03;
 const io_data2: u24 = 0x05;
 const io_data3: u24 = 0x07;
 const io_ctrl1: u24 = 0x09;
+const io_ctrl2: u24 = 0x0B;
 
 /// What $A10001 reports about the board. The PAL bit is the one a game reads
 /// to pick its timing; the rest say export (not Japanese), no expansion
@@ -124,6 +125,31 @@ const version_no_expansion: u8 = 0x20;
 /// A DMA's source counter is 17 bits wide and the bank above it is fixed, so
 /// a transfer that runs off the end of a 128 KiB bank comes back at its start.
 const dma_bank_mask: u32 = 0x1_FFFF;
+
+/// The cartridge header's region field, four bytes at $1F0.
+const region_field = 0x1F0;
+const region_field_len = 4;
+
+/// Whether a cartridge wants a PAL machine, for the frontend's `auto` region.
+/// The field is written two ways: the old one lists the regions it runs in as
+/// letters (`JUE`, `E`), the newer one packs them into one hex digit — bit 0
+/// Japan, bit 2 overseas NTSC, bit 3 overseas PAL. Either way, PAL means
+/// Europe and nothing else, because a cart that also runs on an American
+/// machine should run at the speed it was written for.
+pub fn romIsPal(rom: []const u8) bool {
+    if (rom.len < region_field + region_field_len) return false;
+    const field = std.mem.trim(u8, rom[region_field..][0..region_field_len], " \x00");
+    if (field.len == 0) return false;
+    // 'E' is both a region letter and a hex digit, so the letter form has to
+    // win whenever the whole field reads as letters.
+    for (field) |ch| {
+        if (std.mem.indexOfScalar(u8, "JUE", ch) == null) break;
+    } else return std.mem.indexOfScalar(u8, field, 'E') != null and
+        std.mem.indexOfAny(u8, field, "UJ") == null;
+
+    const bits = std.fmt.charToDigit(field[0], 16) catch return false;
+    return bits & 0b1000 != 0 and bits & 0b0101 == 0;
+}
 
 // Controller bits, active high here and inverted on the way out to the ROM.
 pub const btn_up: u8 = 0x01;
@@ -169,6 +195,9 @@ pub const Genesis = struct {
     buttons: u8 = 0,
     pad_ctrl: u8 = 0,
     pad_data: u8 = 0,
+    buttons2: u8 = 0,
+    pad2_ctrl: u8 = 0,
+    pad2_data: u8 = 0,
 
     frame: u32 = 0,
     line: u32 = 0,
@@ -314,10 +343,12 @@ pub const Genesis = struct {
         return switch (addr & io_mask) {
             io_version => version_export | version_no_expansion |
                 @as(u8, if (g.v.pal) version_pal else 0),
-            io_data1 => g.padByte(),
-            // Nothing is plugged into ports 2 and 3: every line floats high.
-            io_data2, io_data3 => if (g.pad_ctrl & th_bit != 0) th_bit | pad_bits else pad_bits,
+            io_data1 => padByte(g.buttons, g.pad_ctrl, g.pad_data),
+            io_data2 => padByte(g.buttons2, g.pad2_ctrl, g.pad2_data),
+            // Nothing is plugged into the expansion port: every line floats high.
+            io_data3 => pad_bits,
             io_ctrl1 => g.pad_ctrl,
+            io_ctrl2 => g.pad2_ctrl,
             else => 0x00,
         };
     }
@@ -326,15 +357,17 @@ pub const Genesis = struct {
         switch (addr & io_mask) {
             io_data1 => g.pad_data = val,
             io_ctrl1 => g.pad_ctrl = val,
+            io_data2 => g.pad2_data = val,
+            io_ctrl2 => g.pad2_ctrl = val,
             else => {},
         }
     }
 
     /// Three-button pad. TH is an output the ROM toggles to pick which half of
-    /// the pad it sees; every button reads low when pressed.
-    fn padByte(g: *Genesis) u8 {
-        const th = g.pad_ctrl & th_bit == 0 or g.pad_data & th_bit != 0;
-        const b = g.buttons;
+    /// the pad it sees; every button reads low when pressed. Both ports are
+    /// the same circuit, so both call this.
+    fn padByte(b: u8, ctrl: u8, data: u8) u8 {
+        const th = ctrl & th_bit == 0 or data & th_bit != 0;
         const low: u8 = if (th)
             b & pad_bits // C B R L D U
         else
@@ -555,18 +588,32 @@ test "controller: TH driven high reads face buttons, TH driven low reads Start/A
     g.buttons = btn_c | btn_left | btn_a | btn_start;
 
     g.pad_data = 0x40; // TH high: C,B,Right,Left,Down,Up
-    const th_high = g.padByte();
+    const th_high = Genesis.padByte(g.buttons, g.pad_ctrl, g.pad_data);
     try testing.expectEqual(@as(u8, 0x40), th_high & 0x40); // TH echoed back
     try testing.expectEqual(@as(u8, 0), th_high & btn_c); // pressed -> bit low
     try testing.expectEqual(@as(u8, 0), th_high & btn_left); // pressed -> bit low
     try testing.expectEqual(@as(u8, btn_up | btn_down | btn_right | btn_b), th_high & 0x3F);
 
     g.pad_data = 0x00; // TH low: Start,A,0,0,Down,Up
-    const th_low = g.padByte();
+    const th_low = Genesis.padByte(g.buttons, g.pad_ctrl, g.pad_data);
     try testing.expectEqual(@as(u8, 0), th_low & 0x40);
     try testing.expectEqual(@as(u8, 0), th_low & 0x10); // A -> bit4 low
     try testing.expectEqual(@as(u8, 0), th_low & 0x20); // Start -> bit5 low
     try testing.expectEqual(@as(u8, 0x0C), th_low & 0x0C); // bits 2-3: always unpressed
+}
+
+test "the second port is a pad of its own, and the third is empty" {
+    var c = Cpu{};
+    var g = Genesis{ .rom = &.{}, .cpu = &c };
+    g.write8(0xA1000B, 0x40); // TH an output on port 2
+    g.write8(0xA10005, 0x40); // ...driven high
+    g.buttons = btn_c; // player 1 holding C must not show up on port 2
+    g.buttons2 = btn_start | btn_left;
+
+    try testing.expectEqual(@as(u8, 0x40), g.read8(0xA1000B));
+    try testing.expectEqual(@as(u8, 0), g.read8(0xA10005) & btn_left);
+    try testing.expectEqual(@as(u8, btn_c), g.read8(0xA10005) & btn_c);
+    try testing.expectEqual(@as(u8, pad_bits), g.read8(0xA10007));
 }
 
 test "controller: TH configured as an input always reads the TH-high state" {
@@ -576,7 +623,7 @@ test "controller: TH configured as an input always reads the TH-high state" {
     g.pad_data = 0x00; // irrelevant while TH is an input
     g.buttons = btn_up;
 
-    const got = g.padByte();
+    const got = Genesis.padByte(g.buttons, g.pad_ctrl, g.pad_data);
     try testing.expectEqual(@as(u8, 0x40), got & 0x40);
     try testing.expectEqual(@as(u8, 0), got & btn_up);
 }
@@ -650,4 +697,21 @@ test "a full-volume PSG channel sits a fifth of a full-scale FM channel, as the 
     // is the bug this pins: the PSG drowning out the music.
     const ratio = @as(f64, @floatFromInt(psg_pp)) / @as(f64, @floatFromInt(fm_pp));
     try testing.expect(ratio > 0.15 and ratio < 0.30);
+}
+
+test "the header's region field picks a machine, in both of its encodings" {
+    var rom: [0x200]u8 = @splat(0);
+    const field = rom[region_field..][0..region_field_len];
+
+    @memcpy(field, "JUE ");
+    try testing.expect(!romIsPal(&rom));
+    @memcpy(field, "E   ");
+    try testing.expect(romIsPal(&rom)); // a letter, not the hex digit 14
+    @memcpy(field, "U   ");
+    try testing.expect(!romIsPal(&rom));
+    @memcpy(field, "8   "); // overseas PAL only
+    try testing.expect(romIsPal(&rom));
+    @memcpy(field, "F   "); // every region: NTSC wins
+    try testing.expect(!romIsPal(&rom));
+    try testing.expect(!romIsPal(rom[0..16])); // too short to have a header
 }

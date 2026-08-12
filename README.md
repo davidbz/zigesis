@@ -35,7 +35,12 @@ for the full plan and acceptance criteria):
   the HV counter latch, VSRAM caching. Then rendering: H32, shadow/highlight,
   both interlace modes, per-line sprite and pixel limits with X=0 masking, and
   PAL V30 timing. VDPFIFOTesting scores 111 of 122 (see `DESIGN.md` section 9).
-- **M5 and later** (save states, debug tooling, compatibility pass) are not
+- **M5 — Frontend shell: done.** Idle snow screen, ROM loading by
+  drag-and-drop, built-in file browser or command line, a keyboard- and
+  mouse-driven menu, rebindable keys for both pads and every hotkey, window
+  scale and fullscreen, pause and reset, region auto-detection, and a
+  plain-text config file that survives a restart.
+- **M6 and later** (save states, debug tooling, compatibility pass) are not
   started.
 
 ## Requirements
@@ -80,10 +85,51 @@ zig build run -- rom.bin --shot 900 --hash     # print the pinned regression has
 ```
 
 The ROM is the first positional argument and the PNG path the second; flags
-may appear in any order.
+may appear in any order. The ROM is optional: started without one, zigesis
+idles on a snow screen until a file is dropped on the window or picked from
+the menu. `--volume` and `--pal` override the saved options for that run
+only.
 
-Controls: arrow keys for the d-pad, A/S/D for buttons A/B/C, Enter for
-Start.
+### Controls
+
+| Key | Does |
+|-----|------|
+| Arrows | D-pad |
+| A / S / D | Buttons A / B / C |
+| Enter | Start |
+| Esc | Menu (and back out of it) |
+| O | Load ROM |
+| P | Pause |
+| F5 | Soft reset |
+| F11 | Fullscreen |
+
+Every one of those is rebindable from Options → Keys, including a second
+controller, which ships unbound. The menu takes the arrow keys and Enter or
+the mouse; left/right change a value in place.
+
+### Options file
+
+Options are written whenever the menu changes one, to
+`$XDG_CONFIG_HOME/zigesis/config.ini` (or `~/.config/zigesis/config.ini`,
+`%APPDATA%\zigesis\config.ini`, or `zigesis.ini` beside the executable). It
+is plain `key = value` text meant to be hand-edited:
+
+```ini
+version = 1
+scale = 3
+fullscreen = false
+region = auto
+audio = true
+volume = 100
+key.up = UP
+key.a = A
+key.p2_up = NONE
+```
+
+Unknown keys are ignored and out-of-range values clamped; a file with a
+missing or unrecognised `version` is ignored entirely and the defaults are
+used. `region = auto` reads the cartridge header, so a PAL-only game gets a
+50 Hz machine without being told.
 
 ### Deterministic replay
 
@@ -106,7 +152,8 @@ zig build test
 ```
 
 Runs, per module: VDP, Z80, PSG, YM2612, audio mixer, `genesis` (memory map and
-bus), and `scheduler` (timing and interrupts) unit tests, plus two small Z80
+bus), `scheduler` (timing and interrupts), and the frontend's `input`,
+`config`, `snow` and menu-arithmetic unit tests, plus two small Z80
 conformance-harness unit tests. It also runs the headless regression suite
 (`test/system_test.zig`), which boots
 [Cave Story MD](https://github.com/andwn/cave-story-md) — a freely
@@ -196,6 +243,11 @@ src/
   psg.zig             SN76489 PSG: tone and noise channels, attenuation
   ym2612.zig          YM2612 FM: operators, envelopes, LFO, timers, DAC
   audio.zig           mixing, resampling, the ring buffer that feeds raylib
+  input.zig           key bindings: which host key drives which pad button or hotkey
+  config.zig          the options file: parse, write, defaults
+  ui/
+    shell.zig         menu, file browser, key rebinding (raylib primitives only)
+    snow.zig          the idle screen's noise, as pixels in an array
   z80/
     cpu.zig           architectural state: registers, flags, interrupt latches
     decode.zig        opcode field decomposition, register tables
