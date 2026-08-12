@@ -232,6 +232,16 @@ One window, simple design, no toolbar clutter. States:
   and whether the checksum matches the ROM — green or red). Nothing here is
   looked up anywhere: every reading comes out of the cartridge itself.
 
+Under all three states sits a status bar, two lines of the menu's font tall.
+It is chrome the window is *sized* for, not an overlay: the picture is drawn
+into what is left above it, so nothing on the bar ever covers the game. Left
+to right it carries the pad — the cross and A/B/C/START, lit by the button
+byte the machine is being handed this frame, which is also what a replay is
+playing back — then the cartridge's name off its own header, and on the right
+the quicksave's two keys with how old the quicksave is, a MUTE badge when the
+volume is off, and the frame rate, which reads PAUSED while the machine is
+stopped. Everything on it is state the shell already held.
+
 Key configuration UI: pick an action, press a key, it rebinds; Escape
 cancels; conflicts are highlighted. Bindings live in the config file.
 
