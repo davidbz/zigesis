@@ -73,6 +73,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const icon = b.addModule("icon", .{
+        .root_source_file = b.path("src/ui/icon.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const scheduler = b.addModule("scheduler", .{
         .root_source_file = b.path("src/scheduler.zig"),
@@ -131,6 +136,10 @@ pub fn build(b: *std.Build) void {
     const snow_tests = b.addTest(.{ .root_module = snow });
     test_step.dependOn(&b.addRunArtifact(snow_tests).step);
     check_step.dependOn(&snow_tests.step);
+
+    const icon_tests = b.addTest(.{ .root_module = icon });
+    test_step.dependOn(&b.addRunArtifact(icon_tests).step);
+    check_step.dependOn(&icon_tests.step);
 
     // The headless frame-hash regression suite: no raylib in its import
     // graph, so it can run anywhere `zig build test` runs.
@@ -259,6 +268,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "config", .module = cfg },
                     .{ .name = "input", .module = input },
                     .{ .name = "snow", .module = snow },
+                    .{ .name = "icon", .module = icon },
                 },
             }),
         });
@@ -299,5 +309,25 @@ pub fn build(b: *std.Build) void {
         run.step.dependOn(b.getInstallStep());
         if (b.args) |args| run.addArgs(args);
         b.step("run", "Run a Genesis ROM (needs roms/)").dependOn(&run.step);
+
+        // The icon is art in a Zig file; this is how it becomes the PNG the
+        // README shows. Rerun it after editing `src/ui/icon.zig`.
+        const export_icon = b.addExecutable(.{
+            .name = "export-icon",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/export_icon.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "icon", .module = icon }},
+            }),
+        });
+        export_icon.root_module.linkLibrary(raylib_dep.artifact("raylib"));
+        if (target.result.os.tag == .linux) export_icon.use_lld = false;
+        check_step.dependOn(&export_icon.step);
+        const export_icon_run = b.addRunArtifact(export_icon);
+        export_icon_run.setCwd(b.path(".")); // writes assets/ in the project
+        b.step("icon", "Regenerate assets/icon.png from src/ui/icon.zig")
+            .dependOn(&export_icon_run.step);
     }
 }

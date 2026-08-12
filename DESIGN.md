@@ -723,6 +723,13 @@ hex-digit bitmask; `E` is ambiguous between them and is read as the letter).
 Changing region resets, because timing is chosen when the machine starts and
 running on at the old rate would be a lie.
 
+**The icon** is the same joke as the idle screen: a 32x32 CRT with an
+antenna and a screenful of static, written as a character grid in
+`ui/icon.zig` with the palette beside it. `main.zig` hands the pixels to
+`SetWindowIcon` and `zig build icon` writes them out as `assets/icon.png` for
+the README, so there is one source of truth and no binary asset to load at
+startup.
+
 **Pacing.** A running game is still paced by the audio ring (§7); idle,
 paused, and no-audio-device frames have nothing draining the mixer, so
 `SetTargetFPS` takes over. The snow is a 160x120 texture stretched over

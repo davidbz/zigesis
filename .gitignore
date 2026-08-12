@@ -26,5 +26,7 @@ roms/
 # SingleStepTests conformance corpora, fetched by tools/fetch_z80_tests.sh.
 testdata/
 
-# Headless --shot output.
+# Headless --shot output. The icon is art, not output: `zig build icon`
+# regenerates it from src/ui/icon.zig, and it is committed.
 *.png
+!assets/*.png

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/icon.png" alt="" width="128">
+</p>
+
 # zigesis
 
 A Sega Genesis / Mega Drive emulator written in Zig.
@@ -63,6 +67,7 @@ for the full plan and acceptance criteria):
 ```
 zig build check    # compile everything, no linking or execution (fast)
 zig build          # build the zigesis executable into zig-out/bin/
+zig build icon     # redraw assets/icon.png from src/ui/icon.zig
 ```
 
 ## Running
@@ -248,6 +253,7 @@ src/
   ui/
     shell.zig         menu, file browser, key rebinding (raylib primitives only)
     snow.zig          the idle screen's noise, as pixels in an array
+    icon.zig          the app icon, one character per pixel
   z80/
     cpu.zig           architectural state: registers, flags, interrupt latches
     decode.zig        opcode field decomposition, register tables
@@ -258,6 +264,7 @@ test/
   system_test.zig     headless frame-hash and audio-hash regression suite
   z80_sst_test.zig    SingleStepTests/z80 conformance runner
 tools/
+  export_icon.zig     turns src/ui/icon.zig into assets/icon.png (zig build icon)
   fetch_test_roms.sh  fetches the free test ROMs (regression suite, VDP conformance) into roms/
   fetch_z80_tests.sh  fetches the Z80 conformance corpus into testdata/
   fetch_ym_reference.sh  fetches Nuked-OPN2, the FM reference, into testdata/

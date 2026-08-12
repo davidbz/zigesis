@@ -33,6 +33,7 @@ const audio = @import("audio");
 const config = @import("config");
 const input = @import("input");
 const snow = @import("snow");
+const icon = @import("icon");
 const shell = @import("ui/shell.zig");
 
 const rl = @cImport(@cInclude("raylib.h"));
@@ -429,6 +430,18 @@ fn windowed(
     }
     defer rl.CloseWindow();
     rl.SetExitKey(rl.KEY_NULL); // Escape is the menu key, not the quit key
+
+    // GLFW copies the icon, but not until this call returns, so the pixels
+    // have to outlive it — hence the buffer living out here.
+    var icon_px: [icon.size * icon.size]u32 = undefined;
+    icon.pixels(&icon_px);
+    rl.SetWindowIcon(.{
+        .data = &icon_px,
+        .width = icon.size,
+        .height = icon.size,
+        .mipmaps = 1,
+        .format = rl.PIXELFORMAT_UNCOMPRESSED_R8G8B8A8,
+    });
 
     const tex = rl.LoadTextureFromImage(fbImage(g));
     var flakes = snow.Snow{};
