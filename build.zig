@@ -41,6 +41,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const cart = b.addModule("cart", .{
+        .root_source_file = b.path("src/cart.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const genesis = b.addModule("genesis", .{
         .root_source_file = b.path("src/genesis.zig"),
         .target = target,
@@ -52,7 +57,14 @@ pub fn build(b: *std.Build) void {
             .{ .name = "psg", .module = psg },
             .{ .name = "ym2612", .module = ym2612 },
             .{ .name = "audio", .module = audio },
+            .{ .name = "cart", .module = cart },
         },
+    });
+    const state = b.addModule("state", .{
+        .root_source_file = b.path("src/state.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "genesis", .module = genesis }},
     });
     // Frontend data modules: bindings, options, and the idle screen's pixels.
     // Still no raylib — only `main.zig` and `ui/shell.zig` draw anything.
@@ -112,9 +124,17 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(audio_tests).step);
     check_step.dependOn(&audio_tests.step);
 
+    const cart_tests = b.addTest(.{ .root_module = cart });
+    test_step.dependOn(&b.addRunArtifact(cart_tests).step);
+    check_step.dependOn(&cart_tests.step);
+
     const genesis_tests = b.addTest(.{ .root_module = genesis });
     test_step.dependOn(&b.addRunArtifact(genesis_tests).step);
     check_step.dependOn(&genesis_tests.step);
+
+    const state_tests = b.addTest(.{ .root_module = state });
+    test_step.dependOn(&b.addRunArtifact(state_tests).step);
+    check_step.dependOn(&state_tests.step);
 
     const scheduler_tests = b.addTest(.{ .root_module = scheduler });
     test_step.dependOn(&b.addRunArtifact(scheduler_tests).step);
@@ -142,6 +162,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "genesis", .module = genesis },
             .{ .name = "scheduler", .module = scheduler },
             .{ .name = "audio", .module = audio },
+            .{ .name = "state", .module = state },
         },
     }) });
     const system_tests_run = b.addRunArtifact(system_tests);
@@ -259,6 +280,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "config", .module = cfg },
                     .{ .name = "input", .module = input },
                     .{ .name = "snow", .module = snow },
+                    .{ .name = "state", .module = state },
                 },
             }),
         });

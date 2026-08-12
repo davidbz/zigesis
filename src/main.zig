@@ -33,6 +33,7 @@ const audio = @import("audio");
 const config = @import("config");
 const input = @import("input");
 const snow = @import("snow");
+const state = @import("state");
 const shell = @import("ui/shell.zig");
 
 const rl = @cImport(@cInclude("raylib.h"));
@@ -49,6 +50,10 @@ const ntsc_fps = 60;
 const pal_fps = 50;
 /// What the idle snow screen costs: one small texture upload per frame.
 const idle_fps = 60;
+
+/// How long a dirty backup RAM waits before it is written back to its file.
+/// A game touches its save many times in a row, and the file is 64 KiB.
+const sram_write_seconds = 5;
 
 /// One byte per frame at ~60 Hz, so this is a bit over three hours of input.
 const max_replay_bytes = 1 << 20;
@@ -172,9 +177,13 @@ fn paceToAudio(g: *Genesis, io: std.Io) void {
 /// Power-on, and also what the Reset menu entry does: every chip back to its
 /// reset state with the cartridge still in the slot. Not the 68000's reset
 /// line — that would keep work RAM, and no game notices the difference.
+///
+/// Backup RAM does not survive this, because it is a battery, not a chip: the
+/// caller writes it out and reads it back around the call (`flushSram`).
 fn startMachine(g: *Genesis, c: *Cpu, rom: []const u8, cfg: Config, opts: Opts) void {
     c.* = .{};
-    g.* = .{ .rom = rom, .cpu = c, .z80_trace = opts.trace_z80 };
+    g.* = .init(rom, c);
+    g.z80_trace = opts.trace_z80;
     g.y.ladder = opts.ladder;
     g.y.mute = opts.mute;
     g.v.pal = switch (cfg.region) {
@@ -183,6 +192,80 @@ fn startMachine(g: *Genesis, c: *Cpu, rom: []const u8, cfg: Config, opts: Opts) 
         .pal => true,
     };
     Core.reset(c, g);
+}
+
+/// Save states and backup RAM live beside the ROM, with an extension *added*
+/// rather than replaced: `sonic.bin.srm`, `sonic.bin.st0`. Two ROMs of the
+/// same name in different formats then never share a file.
+fn keepPath(buf: []u8, path: []const u8) []const u8 {
+    const n = @min(path.len, buf.len);
+    @memcpy(buf[0..n], path[0..n]);
+    return buf[0..n];
+}
+
+fn sidecarPath(buf: []u8, rom_path: []const u8, comptime fmt: []const u8, args: anytype) ![]const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    try w.writeAll(rom_path);
+    try w.print(fmt, args);
+    return w.buffered();
+}
+
+/// Backup RAM is read once when the cartridge goes in. A short file fills the
+/// front of the window and leaves the rest erased, which is what a game that
+/// grew its save format sees on real hardware too.
+fn loadSram(io: std.Io, g: *Genesis, rom_path: []const u8) void {
+    var buf: [shell.max_path]u8 = undefined;
+    const path = sidecarPath(&buf, rom_path, ".srm", .{}) catch return;
+    _ = std.Io.Dir.cwd().readFile(io, path, &g.cart.sram) catch return;
+    g.cart.sram_dirty = false;
+}
+
+fn flushSram(io: std.Io, g: *Genesis, rom_path: []const u8) !void {
+    if (!g.cart.sram_dirty) return;
+    var buf: [shell.max_path]u8 = undefined;
+    const path = try sidecarPath(&buf, rom_path, ".srm", .{});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = &g.cart.sram });
+    g.cart.sram_dirty = false;
+}
+
+fn saveState(io: std.Io, g: *const Genesis, c: *const Cpu, rom_path: []const u8, slot: u8) !void {
+    var buf: [shell.max_path]u8 = undefined;
+    const path = try sidecarPath(&buf, rom_path, ".st{d}", .{slot});
+    var f = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer f.close(io);
+    var out: [4096]u8 = undefined;
+    var w = f.writer(io, &out);
+    try state.write(g, c, &w.interface);
+    try w.interface.flush();
+}
+
+/// What the slot pages show: when each slot was written, or 0 for a slot with
+/// no file. A slot that cannot be statted reads as empty, which is what it is
+/// as far as loading it goes.
+fn refreshStamps(io: std.Io, ui: *shell.Ui, rom_path: ?[]const u8) void {
+    ui.stamps = @splat(0);
+    ui.stamps_dirty = false;
+    const rom = rom_path orelse return;
+    var buf: [shell.max_path]u8 = undefined;
+    for (&ui.stamps, 0..) |*stamp, slot| {
+        const path = sidecarPath(&buf, rom, ".st{d}", .{slot}) catch continue;
+        const st = std.Io.Dir.cwd().statFile(io, path, .{}) catch continue;
+        stamp.* = @intCast(@divTrunc(st.mtime.nanoseconds, std.time.ns_per_s));
+    }
+}
+
+/// Wall clock, not `rl.GetTime()`: the ages on the slot pages are measured
+/// against file timestamps, which are the same clock.
+fn nowSeconds(io: std.Io) i64 {
+    return @intCast(@divTrunc(std.Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s));
+}
+
+fn loadState(io: std.Io, gpa: std.mem.Allocator, g: *Genesis, c: *Cpu, rom_path: []const u8, slot: u8) !void {
+    var buf: [shell.max_path]u8 = undefined;
+    const path = try sidecarPath(&buf, rom_path, ".st{d}", .{slot});
+    const bytes = try gpa.alloc(u8, state.size);
+    defer gpa.free(bytes);
+    try state.read(try std.Io.Dir.cwd().readFile(io, path, bytes), g, c);
 }
 
 /// XDG on Linux, `%APPDATA%` on Windows, and the working directory when the
@@ -310,7 +393,7 @@ pub fn main(init: std.process.Init) !void {
     if (pal_arg) cfg.region = .pal;
     if (rom) |image| startMachine(g, &c, image, cfg, opts);
 
-    try windowed(io, gpa, g, &c, &cfg, cfg_path, opts, &rom, replay_path, record_path);
+    try windowed(io, gpa, g, &c, &cfg, cfg_path, opts, &rom, path, replay_path, record_path);
 }
 
 const HeadlessArgs = struct {
@@ -411,6 +494,7 @@ fn windowed(
     cfg_path: []const u8,
     opts: Opts,
     rom: *?[]u8,
+    rom_path: ?[]const u8,
     replay_path: ?[]const u8,
     record_path: ?[]const u8,
 ) !void {
@@ -455,7 +539,14 @@ fn windowed(
     defer rl.UnloadAudioStream(stream);
     rl.PlayAudioStream(stream);
 
+    // Where this ROM's own files go. It outlives the `Request.load` slice it
+    // is copied from, which points into the shell's own buffer.
+    var path_buf: [shell.max_path]u8 = undefined;
+    var path: ?[]const u8 = if (rom_path) |p| keepPath(&path_buf, p) else null;
+    if (path) |p| loadSram(io, g, p);
+
     var ui = shell.Ui{};
+    var sram_next: f64 = 0;
     var applied_scale = cfg.scale;
     var applied_fullscreen = false;
     var target_fps: c_int = -1;
@@ -465,18 +556,44 @@ fn windowed(
         switch (shell.update(&ui, cfg, rom.* != null)) {
             .none => {},
             .quit => quit = true,
-            .reset => if (rom.*) |image| startMachine(g, c, image, cfg.*, opts),
+            // Backup RAM is a battery: it survives a reset, so it goes out to
+            // disk and comes back in around the machine being rebuilt.
+            .reset => if (rom.*) |image| {
+                if (path) |p| flushSram(io, g, p) catch |err| ui.status("cannot save SRAM: {t}", .{err});
+                startMachine(g, c, image, cfg.*, opts);
+                if (path) |p| loadSram(io, g, p);
+            },
             .load => |p| {
                 const image = std.Io.Dir.cwd().readFileAlloc(io, p, gpa, .limited(max_rom_bytes)) catch |err| {
                     ui.status("cannot load {s}: {t}", .{ p, err });
                     continue;
                 };
+                if (path) |old| flushSram(io, g, old) catch |err| ui.status("cannot save SRAM: {t}", .{err});
                 if (rom.*) |old| gpa.free(old);
                 rom.* = image;
+                path = keepPath(&path_buf, p);
                 startMachine(g, c, image, cfg.*, opts);
+                loadSram(io, g, path.?);
                 ui.status("{s}: {d} KiB", .{ p, image.len >> 10 });
                 frames = 0;
             },
+            .save_state => |slot| if (path) |p| {
+                var name: [16]u8 = undefined;
+                if (saveState(io, g, c, p, slot)) {
+                    ui.status("saved {s}", .{shell.slotName(slot, &name)});
+                } else |err| ui.status("cannot save {s}: {t}", .{ shell.slotName(slot, &name), err });
+                ui.stamps_dirty = true;
+            },
+            .load_state => |slot| if (path) |p| {
+                var name: [16]u8 = undefined;
+                if (loadState(io, gpa, g, c, p, slot)) {
+                    ui.status("loaded {s}", .{shell.slotName(slot, &name)});
+                } else |err| ui.status("cannot load {s}: {t}", .{ shell.slotName(slot, &name), err });
+            },
+        }
+        if (ui.open) {
+            ui.now = nowSeconds(io);
+            if (ui.stamps_dirty) refreshStamps(io, &ui, path);
         }
         if (ui.dirty) {
             saveConfig(io, cfg_path, cfg.*) catch |err| ui.status("cannot save options: {t}", .{err});
@@ -492,6 +609,12 @@ fn windowed(
         }
         // The mixer is where the volume knob lives, so muted is volume 0.
         g.audio.volume_pct = if (cfg.audio) cfg.volume else 0;
+        // A game writes its save a byte at a time, so the file is rewritten
+        // at most this often while it plays, and once more on the way out.
+        if (g.cart.sram_dirty and rl.GetTime() >= sram_next) {
+            if (path) |p| flushSram(io, g, p) catch |err| ui.status("cannot save SRAM: {t}", .{err});
+            sram_next = rl.GetTime() + sram_write_seconds;
+        }
 
         const running = rom.* != null and !ui.open and !ui.paused;
         if (running) {
@@ -531,6 +654,7 @@ fn windowed(
         paceToAudio(g, io);
     }
 
+    if (path) |p| flushSram(io, g, p) catch |err| std.debug.print("cannot save SRAM: {t}\n", .{err});
     if (record) |*r| {
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = record_path.?, .data = r.items });
         std.debug.print("recorded {d} frames of input to {s}\n", .{ r.items.len, record_path.? });

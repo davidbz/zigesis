@@ -140,7 +140,7 @@ pub fn main(init: std.process.Init) !void {
     var c = Cpu{};
     const g = try gpa.create(Genesis);
     defer gpa.destroy(g);
-    g.* = .{ .rom = image, .cpu = &c };
+    g.* = .init(image, &c);
     Core.reset(&c, g);
 
     var frames: u32 = 0;

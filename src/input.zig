@@ -35,6 +35,11 @@ pub const Action = enum {
     reset,
     fullscreen,
     open,
+    save_state,
+    load_state,
+    next_slot,
+    quick_save,
+    quick_load,
 
     pub const count = @typeInfo(Action).@"enum".fields.len;
     /// Buttons on one pad; actions past `pads * pad_count` are hotkeys.
@@ -70,6 +75,11 @@ pub const Action = enum {
             .reset => "Reset",
             .fullscreen => "Fullscreen",
             .open => "Open ROM",
+            .save_state => "Save State",
+            .load_state => "Load State",
+            .next_slot => "Next State Slot",
+            .quick_save => "Quicksave",
+            .quick_load => "Quickload",
         };
     }
 };
@@ -95,6 +105,11 @@ pub const defaults: Bindings = blk: {
     b[@intFromEnum(Action.reset)] = key_f5;
     b[@intFromEnum(Action.fullscreen)] = key_f11;
     b[@intFromEnum(Action.open)] = 'O';
+    b[@intFromEnum(Action.save_state)] = key_f2;
+    b[@intFromEnum(Action.next_slot)] = key_f3;
+    b[@intFromEnum(Action.load_state)] = key_f4;
+    b[@intFromEnum(Action.quick_save)] = key_f6;
+    b[@intFromEnum(Action.quick_load)] = key_f7;
     break :blk b;
 };
 
@@ -104,7 +119,12 @@ const key_right = 262;
 const key_left = 263;
 const key_down = 264;
 const key_up = 265;
+const key_f2 = 291;
+const key_f3 = 292;
+const key_f4 = 293;
 const key_f5 = 294;
+const key_f6 = 295;
+const key_f7 = 296;
 const key_f11 = 300;
 
 /// Pad `pad`'s byte for this frame. `down` is the host's keyboard, which is
@@ -149,12 +169,12 @@ const named = [_]struct { []const u8, u32 }{
     .{ "HOME", 268 },
     .{ "END", 269 },
     .{ "F1", 290 },
-    .{ "F2", 291 },
-    .{ "F3", 292 },
-    .{ "F4", 293 },
+    .{ "F2", key_f2 },
+    .{ "F3", key_f3 },
+    .{ "F4", key_f4 },
     .{ "F5", key_f5 },
-    .{ "F6", 295 },
-    .{ "F7", 296 },
+    .{ "F6", key_f6 },
+    .{ "F7", key_f7 },
     .{ "F8", 297 },
     .{ "F9", 298 },
     .{ "F10", 299 },
