@@ -16,6 +16,7 @@ const std = @import("std");
 const audio = @import("audio");
 const genesis = @import("genesis");
 const scheduler = @import("scheduler");
+const state = @import("state");
 
 const Genesis = genesis.Genesis;
 const Cpu = genesis.Cpu;
@@ -75,7 +76,7 @@ fn boot(c: *Cpu, path: []const u8) !*Genesis {
     errdefer std.testing.allocator.free(rom);
 
     const g = try std.testing.allocator.create(Genesis);
-    g.* = .{ .rom = rom, .cpu = c };
+    g.* = .init(rom, c);
     Core.reset(c, g);
     return g;
 }
@@ -102,7 +103,10 @@ test "Cave Story MD boots headless and renders the same frames every run" {
 /// tone channel 2, with a decaying attenuation envelope — and on through the
 /// menu jingle Start makes.
 const audio_frames = 900;
-const audio_expected: u64 = 0xb0f47eaf9aacf8ff;
+/// Re-pinned in M6: the save-data menu reads its backup RAM, which now answers
+/// as erased instead of as the ROM bytes underneath it, and the menu sounds
+/// different for it. The framebuffer checkpoints did not move.
+const audio_expected: u64 = 0x993d81ea36801d7c;
 
 test "the resampled sound output is the same bytes every run" {
     var c = Cpu{};
@@ -172,4 +176,47 @@ test "the VDP scores the same on VDPFIFOTesting page 1 every run" {
         scheduler.runFrame(g, &c);
     }
     try std.testing.expectEqual(vdp_expected, frameHash(g));
+}
+
+/// Where the state is taken: the save-data menu, with the machine well past
+/// reset and its sound driver playing.
+const state_at = 900;
+/// Long enough for the menu jingle and its animation to move on: a state that
+/// restored only the CPU would still be running here, and hash differently.
+const state_frames = 120;
+
+/// Runs `state_frames` frames from wherever the machine is, hashing every
+/// pixel and every sample: two runs that agree agree about the whole machine.
+fn runAndHash(g: *Genesis, c: *Cpu, frame: *u32) !u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    const until = frame.* + state_frames;
+    while (frame.* < until) : (frame.* += 1) {
+        try std.testing.expect(!c.halted);
+        g.buttons = buttonsAt(frame.*);
+        scheduler.runFrame(g, c);
+        while (g.audio.pop()) |s| hasher.update(std.mem.asBytes(&s));
+        hasher.update(std.mem.sliceAsBytes(&g.v.fb));
+    }
+    return hasher.final();
+}
+
+test "a save state resumes the same machine, pixel and sample identical" {
+    var c = Cpu{};
+    const g = try boot(&c, rom_path);
+    defer shutdown(g);
+
+    var frame: u32 = 0;
+    try runTo(g, &c, &frame, state_at);
+
+    const buf = try std.testing.allocator.alloc(u8, state.size);
+    defer std.testing.allocator.free(buf);
+    var w = std.Io.Writer.fixed(buf);
+    try state.write(g, &c, &w);
+
+    const saved_frame = frame;
+    const expected = try runAndHash(g, &c, &frame);
+
+    try state.read(buf, g, &c);
+    frame = saved_frame;
+    try std.testing.expectEqual(expected, try runAndHash(g, &c, &frame));
 }

@@ -752,7 +752,7 @@ Ceilings, and one thing that cannot be checked here:
 - Save states are M6, so Save State and Load State are not on the root menu
   yet — §5.2's tree lists them and this ships the other five entries.
 
-### M6: Save states and cartridge persistence
+### M6: Save states and cartridge persistence — done 2026-08-12
 
 Deliverables: versioned save states with slots, menu entries, and hotkeys;
 SRAM saves with header parsing; the 0xA130F3 banking mapper; TMSS write
@@ -761,6 +761,118 @@ Acceptance: save/load round-trips mid-gameplay are bit-identical under the
 deterministic replay harness (save, run N frames, load, run N frames,
 identical hashes); an SRAM-backed game retains progress across restarts; a
 bank-switched cart boots and switches banks.
+
+Two new files, both the ones §3.1 named: `cart.zig` (the slot) and
+`state.zig` (the states). Everything else is wiring.
+
+**A save state is the machine's bytes.** The data-oriented rule from §4 —
+every chip a plain fixed-size struct owned by value, no pointers between
+chips — is what makes this two `writeAll`s: a small header, then
+`asBytes(Genesis)`, then `asBytes(Cpu)`. There is no per-field serializer to
+forget a field in, which is the usual way save states rot. Only two things in
+`Genesis` are not machine state — the ROM slice it was handed and the CPU it
+points at — and `read` puts both back over the loaded bytes.
+
+The price of that is a file only the build that wrote it can read, and the
+header says so out loud: `layout` is a hash of every field's name, type and
+offset in both structs, computed at comptime, so a state from a build with a
+different field order is refused instead of loaded as garbage. `version` is
+the same refusal for changes a layout hash cannot see — a field that keeps
+its shape and changes its meaning. Slots are nine files beside the ROM
+(`sonic.bin.st0` through `.st8`), extension *added* rather than replaced so
+two dumps of the same game in different formats never share one.
+
+**The cartridge slot** is `Cart`, a 64 KiB backup RAM plus the two things
+that decide what a ROM-space address means. It sits in `Genesis` by value, so
+save states cover it for free, and the ROM bytes stay a slice on `Genesis`
+rather than moving into it — a cartridge is what the machine reads through,
+not what owns the image.
+
+Backup RAM is found by parsing the header window at `$1B0`: `"RA"`, a type
+byte, then the start and end longwords. The interesting case is that most
+carts put that window *inside* the ROM (Cave Story MD is 4 MiB with its save
+at `$200001-$20FFFF`), so the rule is the hardware's, not the header's: the
+window answers only while `$A130F1` bit 0 says it is mapped, and a cart whose
+window sits past the end of its ROM has it mapped from the start because
+nothing else is there to answer. Bit 1 is write protect. Games that overlap
+drive the register themselves — SGDK's `SRAM_enable`/`SRAM_disable` pair is
+exactly this, and Cave Story's save-data menu turns it on and back off inside
+a single frame.
+
+**The mapper** is the seven bank slots at `$A130F3-$A130FF`, one per 512 KiB
+page above the first, which stays fixed. `banks` starts as the identity, so a
+cart that never writes a register behaves exactly as it did before this
+milestone. Registers are on odd addresses, and like the PSG at `$C00011`
+these devices sit on the low byte of the 68000's bus, so a word write lands
+on the register too — that arm forwards `addr | 1` with the low byte, and the
+same shape as the existing PSG arm. TMSS's `$A14000`/`$A14100` are accepted
+and dropped: the licence check writes them and nothing here needs to care.
+
+Both go through the existing bus arms, so the Z80's bank window and DMA read
+the cartridge through the same path the 68000 does — which is what real
+hardware does, and it shows: enabling SRAM over a region the sound driver
+streams from would silence it on a console too.
+
+**On disk.** Backup RAM is a battery, not a chip, so it lives in
+`<rom>.srm`: read once when the cartridge goes in, written back on exit and
+on a five-second debounce while a dirty flag is set, since a game writes its
+save a byte at a time. Reset flushes and reloads around rebuilding the
+machine rather than copying 64 KiB on the stack. A short file fills the front
+of the window and leaves the rest erased, which is what a game that grew its
+save format sees on hardware.
+
+**Frontend.** Five new actions on the existing `input.Action` enum, appended
+after the hotkeys so pad bit order is untouched: F2 saves, F4 loads, F3 walks
+the slot, and F6/F7 are quicksave and quickload. The quicksave is not a
+second mechanism — it is slot 8 with its own two keys, off the F3 rotation,
+so one code path writes all nine files. The root menu grew Save State and
+Load State, each opening a page of the eight slots plus Quick, which is the
+entry §5.2 listed and M5 could not ship.
+
+**A slot says what is in it.** A save-state UI that shows eight identical
+rows makes you overwrite the wrong one, so each row carries a right-hand
+value the way the options pages do: `empty`, or `just now`, `12m ago`,
+`3h ago`, `2d ago`. Relative rather than a date, which needs no timezone
+handling and answers the question actually being asked. The shell has no
+filesystem and does not know where the ROM lives, so `main.zig` stats the
+nine sidecar files and fills in `Ui.stamps` when `Ui.stamps_dirty` asks —
+the same flag-and-fill pattern the config file already uses for `dirty`. The
+flag is set when a slot page is entered, so what is drawn is what is on disk
+even if something else wrote it. Ages are measured against the wall clock,
+not raylib's `GetTime`, because file timestamps are on that clock.
+
+Tested: the header window parsed and absent; an overlapping window staying
+quiet until `$A130F1` maps it in, honouring read-only, and going away again;
+word access carrying both bytes; the mapper swapping a 4 MiB image's pages,
+with even addresses correctly not registers; a state's round trip leaving
+`rom` and `cpu` wired to *this* run; a truncated, a re-magicked and a
+tampered-layout state all refused. The acceptance round trip is in
+`test/system_test.zig`: run 900 frames into the save-data menu, take a state,
+run 120 frames hashing every pixel and every sample, load the state back, run
+the same 120 frames, identical hash. The slot column has its own test — what
+each of "empty", "just now", "2m ago" and a future timestamp reads as, and
+that every row on the page including Quick has one. 122 tests green, and
+VDPFIFOTesting is still 111 of 122.
+
+One pinned hash moved. Cave Story's audio checkpoint changed because its
+save-data menu now reads erased backup RAM where it used to read the ROM
+bytes underneath — the new behaviour is the correct one, and the framebuffer
+checkpoints did not move.
+
+Ceilings:
+
+- Backup RAM is a flat 64 KiB, byte-wide, and the header's type byte is not
+  read: even/odd-only carts see their save mirrored across both bytes rather
+  than packed. EEPROM and the serial saves some carts use are not backup RAM
+  at all and are not handled.
+- The mapper is the standard `$A130F3` one only. SSF2's own mapper, the
+  Sonic & Knuckles lock-on, and the protection chips on unlicensed carts each
+  want their own arm.
+- A state is refused across builds by design, so no state survives a
+  recompile of this emulator. Migrating them would mean a field-by-field
+  serializer, which is the thing this milestone is built to avoid.
+- The headless harness deliberately never touches `.srm` files: a regression
+  run that could pick up someone's save is not deterministic.
 
 ### M7: Debug tooling
 

@@ -14,8 +14,10 @@ const vdp = @import("vdp");
 const psg = @import("psg");
 const ym2612 = @import("ym2612");
 const audio = @import("audio");
+const cart = @import("cart");
 
 pub const Cpu = m68k.Cpu;
+pub const Cart = cart.Cart;
 pub const Core = m68k.Core(Genesis);
 pub const Z80Cpu = z80.Cpu;
 pub const Z80Core = z80.Core(Genesis);
@@ -67,6 +69,15 @@ const busreq_lo: u24 = 0xA1_1100;
 const busreq_hi: u24 = 0xA1_11FF;
 const z80_reset_lo: u24 = 0xA1_1200;
 const z80_reset_hi: u24 = 0xA1_12FF;
+/// The "TIME" block, where a cartridge may put registers of its own: the
+/// backup-RAM control byte and the banking mapper (see `cart.zig`).
+const time_lo: u24 = 0xA1_3000;
+const time_hi: u24 = 0xA1_30FF;
+/// TMSS, on later boards: the BIOS writes "SEGA" here and unlocks the VDP.
+/// This machine has no BIOS and no lock, so the writes are accepted and
+/// dropped rather than left to fall through the memory map (DESIGN.md §8).
+const tmss_lo: u24 = 0xA1_4000;
+const tmss_hi: u24 = 0xA1_41FF;
 /// The VDP's three port pairs, each mirrored once inside the 16 bytes.
 const vdp_data_lo: u24 = 0xC0_0000;
 const vdp_data_hi: u24 = 0xC0_0003;
@@ -166,6 +177,9 @@ pub const Genesis = struct {
     /// Mutable because the VDP stalls it: a full FIFO or a DMA off the 68k
     /// bus holds the CPU by pushing its cycle count forward.
     cpu: *Cpu,
+    /// What the slot adds to those ROM bytes: backup RAM and the banking
+    /// mapper, both of which answer inside the cartridge's address window.
+    cart: Cart = .{},
     ram: [ram_bytes]u8 = @splat(0),
     zram: [zram_bytes]u8 = @splat(0),
     v: vdp.Vdp = .{},
@@ -230,6 +244,12 @@ pub const Genesis = struct {
     /// line boundary just like the 68000's.
     z80_over: u64 = 0,
 
+    /// A machine with a cartridge in the slot. The header is read once, here:
+    /// everything the slot answers with afterwards is in `cart`.
+    pub fn init(rom: []const u8, cpu: *Cpu) Genesis {
+        return .{ .rom = rom, .cpu = cpu, .cart = .init(rom) };
+    }
+
     // ------------------------------------------------------------------ clock
 
     /// The master clock as the 68000 has run it: the line's start plus the
@@ -251,7 +271,7 @@ pub const Genesis = struct {
 
     pub fn read8(g: *Genesis, addr: u24) u8 {
         return switch (addr) {
-            rom_lo...rom_hi => if (addr < g.rom.len) g.rom[addr] else 0xFF,
+            rom_lo...rom_hi => g.cart.read8(g.rom, addr),
             zram_lo...zram_hi => g.zram[addr & zram_mask],
             ym_port_lo...ym_port_hi => g.y.status(),
             io_lo...io_hi => g.ioRead(addr),
@@ -269,7 +289,7 @@ pub const Genesis = struct {
 
     pub fn read16(g: *Genesis, addr: u24) u16 {
         return switch (addr) {
-            rom_lo...rom_hi => if (addr + 1 < g.rom.len) rd16(g.rom, addr) else 0xFFFF,
+            rom_lo...rom_hi => g.cart.read16(g.rom, addr),
             zram_lo...zram_hi => rd16(&g.zram, addr & zram_mask),
             vdp_data_lo...vdp_data_hi => g.v.readData(),
             vdp_ctrl_lo...vdp_ctrl_hi => g.v.readStatus(g.now()),
@@ -283,11 +303,14 @@ pub const Genesis = struct {
 
     pub fn write8(g: *Genesis, addr: u24, val: u8) void {
         switch (addr) {
+            rom_lo...rom_hi => g.cart.write8(addr, val),
             zram_lo...zram_hi => g.zram[addr & zram_mask] = val,
             io_lo...io_hi => g.ioWrite(addr, val),
             ym_port_lo...ym_port_hi => g.y.write(@truncate(addr), val),
             busreq_lo...busreq_hi => g.z80_busreq = val & 1 != 0,
             z80_reset_lo...z80_reset_hi => g.writeZ80Reset(val),
+            time_lo...time_hi => g.cart.writeTime(addr, val),
+            tmss_lo...tmss_hi => {},
             // A byte write to a VDP port still presents a full word, with the
             // byte in both halves.
             vdp_data_lo...vdp_hv_hi => g.write16(addr & ~@as(u24, 1), @as(u16, val) << 8 | val),
@@ -301,7 +324,11 @@ pub const Genesis = struct {
 
     pub fn write16(g: *Genesis, addr: u24, val: u16) void {
         switch (addr) {
+            rom_lo...rom_hi => g.cart.write16(addr, val),
             zram_lo...zram_hi => wr16(&g.zram, addr & zram_mask, val),
+            // The cartridge's own registers hang off the low byte of the bus,
+            // the same way the PSG does.
+            time_lo...time_hi => g.cart.writeTime(addr | 1, @truncate(val)),
             vdp_data_lo...vdp_data_hi => g.stallUntil(g.v.writeData(g.now(), val)),
             vdp_ctrl_lo...vdp_ctrl_hi => {
                 g.v.writeControl(g.now(), val);
@@ -697,6 +724,43 @@ test "a full-volume PSG channel sits a fifth of a full-scale FM channel, as the 
     // is the bug this pins: the PSG drowning out the music.
     const ratio = @as(f64, @floatFromInt(psg_pp)) / @as(f64, @floatFromInt(fm_pp));
     try testing.expect(ratio > 0.15 and ratio < 0.30);
+}
+
+test "backup RAM answers on the cartridge bus once $A130F1 switches it in" {
+    var c = Cpu{};
+    var rom: [0x200]u8 = @splat(0xAB);
+    @memcpy(rom[0x1B0..][0..2], "RA");
+    std.mem.writeInt(u32, rom[0x1B4..][0..4], 0x20_0001, .big);
+    std.mem.writeInt(u32, rom[0x1B8..][0..4], 0x20_FFFF, .big);
+    var g = Genesis.init(&rom, &c);
+    g.cart.sram_on = false; // as an oversized cart with this header powers up
+
+    g.write8(0x20_0001, 0x42);
+    try testing.expectEqual(@as(u8, 0xFF), g.read8(0x20_0001)); // past this ROM
+
+    g.write8(0xA1_30F1, 0x01);
+    g.write8(0x20_0001, 0x42);
+    try testing.expectEqual(@as(u8, 0x42), g.read8(0x20_0001));
+    try testing.expect(g.cart.sram_dirty);
+}
+
+test "the $A130F3 mapper is reachable as a word write, on the low byte" {
+    var c = Cpu{};
+    const rom = [_]u8{0x11} ** 0x1000;
+    var g = Genesis.init(&rom, &c);
+
+    g.write16(0xA1_30F2, 0x0003); // slot 1 <- page 3
+    try testing.expectEqual(@as(u8, 3), g.cart.banks[1]);
+}
+
+test "TMSS writes are accepted and dropped" {
+    var c = Cpu{};
+    var g = Genesis.init(&.{}, &c);
+
+    g.write16(0xA1_4000, 0x5345); // "SE"
+    g.write16(0xA1_4002, 0x4741); // "GA"
+    g.write16(0xA1_4100, 0x0001); // the VDP lock this machine does not have
+    try testing.expectEqual(@as(u8, 0xFF), g.read8(0xA1_4000));
 }
 
 test "the header's region field picks a machine, in both of its encodings" {

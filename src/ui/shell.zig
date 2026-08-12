@@ -20,6 +20,13 @@ const max_entries = 1024;
 const status_seconds = 4;
 const rom_extensions = [_][:0]const u8{ ".bin", ".md", ".gen", ".smd", ".68k" };
 
+/// How many numbered save-state slots there are, plus the quicksave, which is
+/// one more slot with its own two keys rather than a separate mechanism. So a
+/// ROM can grow nine state files beside it, `.st0` through `.st8`.
+pub const slots = 8;
+pub const quick_slot: u8 = slots;
+pub const slot_count = slots + 1;
+
 /// What the menu needs `main.zig` to do.
 pub const Request = union(enum) {
     none,
@@ -27,9 +34,11 @@ pub const Request = union(enum) {
     load: [:0]const u8,
     reset,
     quit,
+    save_state: u8,
+    load_state: u8,
 };
 
-const Page = enum { root, load, options, video, audio, keys };
+const Page = enum { root, load, options, video, audio, keys, save_slots, load_slots };
 
 const Act = union(enum) {
     goto: Page,
@@ -43,6 +52,8 @@ const Act = union(enum) {
     audio_on,
     volume,
     bind: Action,
+    /// A slot on whichever of the two slot pages is up.
+    slot: u8,
 };
 
 const Item = struct { label: [:0]const u8, act: Act };
@@ -50,9 +61,22 @@ const Item = struct { label: [:0]const u8, act: Act };
 const root_items = [_]Item{
     .{ .label = "Resume", .act = .close },
     .{ .label = "Load ROM", .act = .{ .goto = .load } },
+    .{ .label = "Save State", .act = .{ .goto = .save_slots } },
+    .{ .label = "Load State", .act = .{ .goto = .load_slots } },
     .{ .label = "Options", .act = .{ .goto = .options } },
     .{ .label = "Reset", .act = .reset },
     .{ .label = "Quit", .act = .quit },
+};
+
+/// Built once at comptime, like the keys page: every slot, then Back.
+const slot_items = blk: {
+    var items: [slot_count + 1]Item = undefined;
+    for (0..slots) |i| {
+        items[i] = .{ .label = std.fmt.comptimePrint("Slot {d}", .{i}), .act = .{ .slot = i } };
+    }
+    items[quick_slot] = .{ .label = "Quick", .act = .{ .slot = quick_slot } };
+    items[slot_count] = .{ .label = "Back", .act = .back };
+    break :blk items;
 };
 
 const options_items = [_]Item{
@@ -95,6 +119,16 @@ pub const Ui = struct {
     dirty: bool = false,
     /// The action waiting for a key press, if the rebinding UI is up.
     rebind: ?Action = null,
+    /// The slot the save/load hotkeys use. Not an option: it is where you
+    /// are right now, not how you like the emulator set up.
+    slot: u8 = 0,
+    /// When each slot's file was written, in seconds since the epoch, or 0
+    /// for a slot with nothing in it. Filled in by `main.zig` — the shell has
+    /// no filesystem and does not know where the ROM lives — whenever
+    /// `stamps_dirty` asks, and drawn against `now`, which is the same clock.
+    stamps: [slot_count]i64 = @splat(0),
+    now: i64 = 0,
+    stamps_dirty: bool = true,
     browser: Browser = .{},
     path: [max_path:0]u8 = @splat(0),
     status_text: [96:0]u8 = @splat(0),
@@ -116,6 +150,7 @@ pub const Ui = struct {
             .video => &video_items,
             .audio => &audio_items,
             .keys => &key_items,
+            .save_slots, .load_slots => &slot_items,
             .load => &.{}, // the browser draws its own list
         };
     }
@@ -123,6 +158,8 @@ pub const Ui = struct {
     fn goto(ui: *Ui, page: Page) void {
         ui.page = page;
         ui.sel = 0;
+        // What is on disk can have changed since the last visit to the page.
+        if (page == .save_slots or page == .load_slots) ui.stamps_dirty = true;
     }
 };
 
@@ -157,6 +194,17 @@ fn hotkeys(ui: *Ui, cfg: *Config, has_rom: bool) Request {
         ui.dirty = true;
     } else if (pressed(cfg, .reset)) {
         return .reset;
+    } else if (pressed(cfg, .next_slot)) {
+        ui.slot = (ui.slot + 1) % slots;
+        ui.status("state slot {d}", .{ui.slot});
+    } else if (has_rom and pressed(cfg, .save_state)) {
+        return .{ .save_state = ui.slot };
+    } else if (has_rom and pressed(cfg, .load_state)) {
+        return .{ .load_state = ui.slot };
+    } else if (has_rom and pressed(cfg, .quick_save)) {
+        return .{ .save_state = quick_slot };
+    } else if (has_rom and pressed(cfg, .quick_load)) {
+        return .{ .load_state = quick_slot };
     } else if (!has_rom and rl.GetKeyPressed() != 0) {
         // The idle screen asks for any key; the menu is what any key gets.
         ui.open = true;
@@ -220,6 +268,14 @@ fn menuKeys(ui: *Ui, cfg: *Config, has_rom: bool) Request {
         .bind => |action| {
             ui.rebind = action;
             return .none;
+        },
+        .slot => |n| {
+            if (!has_rom) return .none;
+            // The slot you picked is the one the hotkeys then use — except
+            // the quicksave, which keeps its own two keys.
+            if (n != quick_slot) ui.slot = n;
+            ui.open = false;
+            return if (ui.page == .save_slots) .{ .save_state = n } else .{ .load_state = n };
         },
         // Enter on a value cycles it forward; left/right walk it either way.
         else => |act| adjust(ui, cfg, act, 1, has_rom),
@@ -439,6 +495,8 @@ pub fn draw(ui: *const Ui, cfg: *const Config) void {
         .video => "Video",
         .audio => "Audio",
         .keys => "Keys — Enter to rebind, Esc to cancel",
+        .save_slots => "Save State",
+        .load_slots => "Load State",
     };
     rl.DrawText(title, half(fs), half(fs), fs, dim);
 
@@ -484,8 +542,28 @@ fn valueText(act: Act, cfg: *const Config, ui: *const Ui, buf: []u8) ?[:0]const 
             var name: [16]u8 = undefined;
             break :blk std.fmt.bufPrintZ(buf, "{s}", .{input.keyName(cfg.keys[@intFromEnum(action)], &name)}) catch null;
         },
+        .slot => |n| stampText(ui.stamps[n], ui.now, buf),
         else => null,
     };
+}
+
+/// What a slot's row says on the right: whether there is anything in it, and
+/// how old it is. Relative rather than a date — there is no timezone to get
+/// wrong, and "2m ago" is the question actually being asked of a save slot.
+pub fn stampText(stamp: i64, now: i64, buf: []u8) ?[:0]const u8 {
+    if (stamp == 0) return "empty";
+    const secs = @max(now - stamp, 0);
+    if (secs < 60) return "just now";
+    if (secs < 60 * 60) return std.fmt.bufPrintZ(buf, "{d}m ago", .{@divTrunc(secs, 60)}) catch null;
+    if (secs < 24 * 60 * 60) return std.fmt.bufPrintZ(buf, "{d}h ago", .{@divTrunc(secs, 60 * 60)}) catch null;
+    return std.fmt.bufPrintZ(buf, "{d}d ago", .{@divTrunc(secs, 24 * 60 * 60)}) catch null;
+}
+
+/// How a slot is named in a status line. `main.zig` reports saves and loads
+/// there, and "quick" is what F6 wrote, not "slot 8".
+pub fn slotName(slot: u8, buf: []u8) []const u8 {
+    if (slot == quick_slot) return "quicksave";
+    return std.fmt.bufPrint(buf, "slot {d}", .{slot}) catch "slot";
 }
 
 fn drawBrowser(ui: *const Ui) void {
@@ -544,6 +622,31 @@ test "values clamp at their ends and the region wraps" {
     // Changing region restarts the machine, but only if there is one.
     try std.testing.expectEqual(Request.none, adjust(&ui, &cfg, .region, 1, false));
     try std.testing.expectEqual(Request.reset, adjust(&ui, &cfg, .region, 1, true));
+}
+
+test "a slot says whether it holds anything, and how old it is" {
+    var buf: [32]u8 = undefined;
+    const now: i64 = 1_000_000;
+    try std.testing.expectEqualStrings("empty", stampText(0, now, &buf).?);
+    try std.testing.expectEqualStrings("just now", stampText(now - 59, now, &buf).?);
+    try std.testing.expectEqualStrings("1m ago", stampText(now - 60, now, &buf).?);
+    try std.testing.expectEqualStrings("59m ago", stampText(now - 3599, now, &buf).?);
+    try std.testing.expectEqualStrings("1h ago", stampText(now - 3600, now, &buf).?);
+    try std.testing.expectEqualStrings("3d ago", stampText(now - 3 * 86400, now, &buf).?);
+    // A file written a second into the future — two clocks, or a copied save
+    // — is not "-1m ago".
+    try std.testing.expectEqualStrings("just now", stampText(now + 1, now, &buf).?);
+
+    // Every slot on the page has one, quicksave included, and it is the file
+    // `main.zig` stats for that row.
+    var ui = Ui{ .page = .save_slots };
+    ui.stamps[quick_slot] = now - 120;
+    ui.now = now;
+    const cfg = Config{};
+    try std.testing.expectEqual(slot_count + 1, ui.items().len);
+    try std.testing.expectEqualStrings("Quick", ui.items()[quick_slot].label);
+    try std.testing.expectEqualStrings("2m ago", valueText(ui.items()[quick_slot].act, &cfg, &ui, &buf).?);
+    try std.testing.expectEqualStrings("empty", valueText(ui.items()[0].act, &cfg, &ui, &buf).?);
 }
 
 test "every action has a row on the keys page" {
