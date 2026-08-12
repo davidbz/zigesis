@@ -146,8 +146,12 @@ fn windowW(scale: u8) c_int {
     return vdp.max_width * @as(c_int, scale);
 }
 
+/// The picture plus the status bar under it. `shell.barHeight` derives itself
+/// from the window rather than the scale, so this only has to leave it about
+/// the right room: a tenth of the picture is what it comes out at.
 fn windowH(scale: u8) c_int {
-    return vdp.height_v28 * @as(c_int, scale);
+    const picture = vdp.height_v28 * @as(c_int, scale);
+    return picture + @divTrunc(picture, 10);
 }
 
 fn keyDown(key: u32) bool {
@@ -623,6 +627,7 @@ fn windowed(
                 loadSram(io, g, path.?);
                 describeRom(&ui, g, image, path.?);
                 ui.status("{s}: {d} KiB", .{ p, image.len >> 10 });
+                ui.stamps_dirty = true; // a different ROM's slots
                 frames = 0;
             },
             .save_state => |slot| if (path) |p| {
@@ -639,10 +644,11 @@ fn windowed(
                 } else |err| ui.status("cannot load {s}: {t}", .{ shell.slotName(slot, &name), err });
             },
         }
-        if (ui.open) {
-            ui.now = nowSeconds(io);
-            if (ui.stamps_dirty) refreshStamps(io, &ui, path);
-        }
+        // The bar shows the quicksave's age too, so this is every frame now,
+        // not just while the menu is up. Only the stat of the nine files
+        // waits for something to have changed.
+        ui.now = nowSeconds(io);
+        if (ui.stamps_dirty) refreshStamps(io, &ui, path);
         if (ui.dirty) {
             saveConfig(io, cfg_path, cfg.*) catch |err| ui.status("cannot save options: {t}", .{err});
             ui.dirty = false;
@@ -675,6 +681,7 @@ fn windowed(
             g.buttons = 0;
             g.buttons2 = 0;
         }
+        ui.pad = g.buttons;
 
         // Idle and paused frames have no audio to pace against, so the timer
         // takes over; a running game hands pacing back to the ring buffer.
@@ -712,7 +719,7 @@ fn windowed(
 
 /// The window is a TV: whatever the source is putting out gets stretched to
 /// fill it. H32's 256 pixels and H40's 320 are the same width of glass, and
-/// so are 224 lines and 240.
+/// so are 224 lines and 240. The glass is the window less the status bar.
 fn drawPicture(tex: rl.Texture, w: f32, h: f32) void {
     rl.DrawTexturePro(
         tex,
@@ -721,7 +728,7 @@ fn drawPicture(tex: rl.Texture, w: f32, h: f32) void {
             .x = 0,
             .y = 0,
             .width = @floatFromInt(rl.GetScreenWidth()),
-            .height = @floatFromInt(rl.GetScreenHeight()),
+            .height = @floatFromInt(rl.GetScreenHeight() - shell.barHeight()),
         },
         .{ .x = 0, .y = 0 },
         0,

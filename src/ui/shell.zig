@@ -137,6 +137,9 @@ pub const Ui = struct {
     /// The slot the save/load hotkeys use. Not an option: it is where you
     /// are right now, not how you like the emulator set up.
     slot: u8 = 0,
+    /// The pad byte `main.zig` is handing the machine this frame, which is
+    /// what the bar lights up — the buttons the *game* sees, not the keys.
+    pad: u8 = 0,
     /// When each slot's file was written, in seconds since the epoch, or 0
     /// for a slot with nothing in it. Filled in by `main.zig` — the shell has
     /// no filesystem and does not know where the ROM lives — whenever
@@ -487,6 +490,12 @@ const good = rl.Color{ .r = 110, .g = 230, .b = 130, .a = 255 };
 /// name is stencilled onto its lit marquee in.
 const panel = rl.Color{ .r = 12, .g = 12, .b = 24, .a = 235 };
 const ink = rl.Color{ .r = 20, .g = 16, .b = 0, .a = 255 };
+/// The status bar: a lit slate panel rather than a black gutter, and the
+/// grey a button is when nobody is holding it.
+const bar_top = rl.Color{ .r = 34, .g = 36, .b = 50, .a = 255 };
+const bar_bottom = rl.Color{ .r = 14, .g = 14, .b = 22, .a = 255 };
+const bar_rule = rl.Color{ .r = 78, .g = 82, .b = 110, .a = 255 };
+const chip = rl.Color{ .r = 48, .g = 50, .b = 66, .a = 255 };
 
 /// Text size follows the window so the menu is readable at 1x (a 256-pixel
 /// window) and not comical at 4x or fullscreen.
@@ -507,7 +516,7 @@ fn topY() c_int {
 }
 
 fn visibleRows() usize {
-    const room = rl.GetScreenHeight() - topY() - rowHeight();
+    const room = rl.GetScreenHeight() - barHeight() - topY();
     return @intCast(@max(1, @divTrunc(room, rowHeight())));
 }
 
@@ -538,9 +547,10 @@ fn hoveredRow(sel: usize, n: usize) ?usize {
 }
 
 pub fn draw(ui: *const Ui, cfg: *const Config) void {
+    drawBar(ui, cfg);
     if (ui.status_until > rl.GetTime()) {
         const fs = fontSize();
-        rl.DrawText(&ui.status_text, half(fs), rl.GetScreenHeight() - fs * 2, fs, hilite);
+        rl.DrawText(&ui.status_text, half(fs), rl.GetScreenHeight() - barHeight() - rowHeight(), fs, hilite);
     }
     if (!ui.open) return;
 
@@ -683,6 +693,127 @@ fn drawBrowser(ui: *const Ui) void {
     }
 }
 
+// ------------------------------------------------------------------- bar
+
+/// The strip along the bottom of the window: the pad as the machine sees it,
+/// what is in the cartridge slot, and what the quicksave keys have to say.
+/// `main.zig` sizes the window for it and fits the picture above, so unlike
+/// an overlay this never covers the game.
+pub fn barHeight() c_int {
+    return rowHeight() + half(fontSize());
+}
+
+/// The pad's face buttons, left to right as they sit on the real thing.
+const face_buttons = [_]struct { action: Action, label: [:0]const u8 }{
+    .{ .action = .a, .label = "A" },
+    .{ .action = .b, .label = "B" },
+    .{ .action = .c, .label = "C" },
+    .{ .action = .start, .label = "START" },
+};
+
+/// The cross, as cells of a 3x3 grid. The middle one is the hub: no button
+/// under it, and it is what makes the other four read as a d-pad.
+const dpad_cells = [_]struct { col: c_int, row: c_int, action: ?Action }{
+    .{ .col = 1, .row = 0, .action = .up },
+    .{ .col = 0, .row = 1, .action = .left },
+    .{ .col = 1, .row = 1, .action = null },
+    .{ .col = 2, .row = 1, .action = .right },
+    .{ .col = 1, .row = 2, .action = .down },
+};
+
+fn held(pad: u8, action: Action) bool {
+    return pad & action.padMask() != 0;
+}
+
+/// What the bar says about the quicksave: the two keys that drive it, so
+/// nobody has to open the menu to find out which they are.
+fn quickHint(cfg: *const Config, buf: []u8) [:0]const u8 {
+    var save: [16]u8 = undefined;
+    var load: [16]u8 = undefined;
+    return std.fmt.bufPrintZ(buf, "QUICK {s}/{s}", .{
+        input.keyName(cfg.keys[@intFromEnum(Action.quick_save)], &save),
+        input.keyName(cfg.keys[@intFromEnum(Action.quick_load)], &load),
+    }) catch "QUICK";
+}
+
+fn drawBar(ui: *const Ui, cfg: *const Config) void {
+    const h = barHeight();
+    const w = rl.GetScreenWidth();
+    const y = rl.GetScreenHeight() - h;
+    const fs = @max(10, @divTrunc(h * 2, 5));
+    const gap = half(fs);
+    const ty = y + half(h - fs);
+
+    rl.DrawRectangleGradientV(0, y, w, h, bar_top, bar_bottom);
+    rl.DrawRectangle(0, y, w, 1, bar_rule);
+
+    // Right to left, because everything on this side has a width of its own
+    // and the cartridge's name is the one thing that can be cut short.
+    var buf: [32]u8 = undefined;
+    var right = w - gap;
+    if (ui.paused) {
+        right = barText(right, ty, fs, "PAUSED", hilite);
+    } else if (std.fmt.bufPrintZ(&buf, "{d} FPS", .{rl.GetFPS()})) |fps| {
+        right = barText(right, ty, fs, fps, dim);
+    } else |_| {}
+    if (!cfg.audio or cfg.volume == 0) right = barText(right, ty, fs, "MUTE", bad);
+
+    var age_buf: [32]u8 = undefined;
+    const empty = ui.stamps[quick_slot] == 0;
+    if (stampText(ui.stamps[quick_slot], ui.now, &age_buf)) |age| {
+        right = barText(right, ty, fs, age, if (empty) dim else good);
+    }
+    var keys: [32]u8 = undefined;
+    right = barText(right, ty, fs, quickHint(cfg, &keys), dim);
+
+    const name_x = gap + drawPad(gap, y, h, ui.pad) + fs;
+    const name: [:0]const u8 = if (ui.card_n == 0) "NO CARTRIDGE" else std.mem.sliceTo(&ui.card_title, 0);
+    if (right <= name_x) return;
+    rl.BeginScissorMode(name_x, y, right - name_x, h);
+    defer rl.EndScissorMode();
+    rl.DrawText(name.ptr, name_x, ty, fs, if (ui.card_n == 0) dim else fg);
+}
+
+/// Draws one right-aligned item and hands back the left edge for the next.
+fn barText(x: c_int, y: c_int, fs: c_int, text: [:0]const u8, color: rl.Color) c_int {
+    const width = rl.MeasureText(text.ptr, fs);
+    rl.DrawText(text.ptr, x - width, y, fs, color);
+    return x - width - fs;
+}
+
+/// The pad, lit by the byte the machine is being handed this frame — which
+/// makes it the fastest check there is that a binding does what it says, and
+/// during a replay it is the recorded input playing back. Returns its width.
+fn drawPad(x: c_int, y: c_int, h: c_int, pad: u8) c_int {
+    const u = @max(3, @divTrunc(h, 4));
+    const top = y + half(h - u * 3);
+    for (dpad_cells) |c| {
+        const on = if (c.action) |a| held(pad, a) else false;
+        rl.DrawRectangle(x + c.col * u, top + c.row * u, u - 1, u - 1, if (on) hilite else chip);
+    }
+
+    const fs = @max(8, u);
+    const ch = u * 2;
+    const cy = y + half(h - ch);
+    var bx = x + u * 4;
+    for (face_buttons) |b| {
+        const w = rl.MeasureText(b.label.ptr, fs) + fs;
+        drawChip(bx, cy, w, ch, b.label, fs, held(pad, b.action));
+        bx += w + half(u);
+    }
+    return bx - half(u) - x;
+}
+
+fn drawChip(x: c_int, y: c_int, w: c_int, h: c_int, label: [:0]const u8, fs: c_int, on: bool) void {
+    rl.DrawRectangleRounded(.{
+        .x = @floatFromInt(x),
+        .y = @floatFromInt(y),
+        .width = @floatFromInt(w),
+        .height = @floatFromInt(h),
+    }, 0.45, 6, if (on) hilite else chip);
+    rl.DrawText(label.ptr, x + half(w - rl.MeasureText(label.ptr, fs)), y + half(h - fs), fs, if (on) ink else dim);
+}
+
 /// The idle screen's caption. The snow itself is `snow.zig`, drawn by
 /// `main.zig` as a texture.
 pub fn drawIdlePrompt() void {
@@ -690,7 +821,7 @@ pub fn drawIdlePrompt() void {
     const text = "Press any key";
     const w = rl.MeasureText(text, fs);
     const x = @divTrunc(rl.GetScreenWidth() - w, 2);
-    const y = @divTrunc(rl.GetScreenHeight(), 2) - fs;
+    const y = @divTrunc(rl.GetScreenHeight() - barHeight(), 2) - fs;
     rl.DrawRectangle(x - half(fs), y - half(half(fs)), w + fs, rowHeight(), .{ .r = 0, .g = 0, .b = 0, .a = 160 });
     rl.DrawText(text, x, y, fs, fg);
 }
@@ -773,6 +904,28 @@ test "the cartridge card holds what fits and cuts the rest" {
     try std.testing.expectEqual(card_rows, ui.card_n);
     cardStart(&ui, "", "");
     try std.testing.expectEqual(@as(usize, 0), ui.card_n);
+}
+
+test "every pad button has a light on the bar, and only one" {
+    var mask: u8 = 0;
+    var lights: usize = 0;
+    for (dpad_cells) |c| {
+        const action = c.action orelse continue;
+        mask |= action.padMask();
+        lights += 1;
+    }
+    for (face_buttons) |b| {
+        mask |= b.action.padMask();
+        lights += 1;
+    }
+    try std.testing.expectEqual(@as(u8, 0xFF), mask);
+    try std.testing.expectEqual(@as(usize, 8), lights); // no bit drawn twice
+
+    const cfg = Config{};
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("QUICK F6/F7", quickHint(&cfg, &buf));
+    try std.testing.expect(held(input.Action.start.padMask(), .start));
+    try std.testing.expect(!held(input.Action.start.padMask(), .a));
 }
 
 test "every action has a row on the keys page" {
