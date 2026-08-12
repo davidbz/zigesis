@@ -26,15 +26,15 @@ pub const Ym2612 = ym2612.Ym2612;
 pub const Mixer = audio.Mixer;
 
 // NTSC: a 53.693175 MHz master clock, seven of which make a 68000 cycle, 15
-// of which make a Z80 cycle, and 3420 of which make a scanline.
-// `scheduler.zig` drives the frame loop off these; `hvCounter` below needs
-// them too, so they live with the rest of the machine's hardware constants
-// rather than with the loop that steps it.
+// of which make a Z80 cycle, and 3420 of which make a scanline. The line and
+// frame lengths belong to the VDP, which is the chip that counts them; they
+// are re-exported here because `scheduler.zig` drives the frame loop off the
+// whole set.
 pub const master_clock_hz = 53_693_175;
 pub const mclk_per_cpu = 7;
 pub const mclk_per_z80 = 15;
-pub const mclk_per_line = 3420;
-pub const lines_per_frame = 262;
+pub const mclk_per_line = vdp.mclk_per_line;
+pub const lines_per_frame = vdp.lines_per_frame;
 
 /// The PSG steps once per 16 Z80 clocks (DESIGN.md §3.3), so mclk/240, or
 /// about 223.7 kHz — not a whole number of hertz, which is why the ratio
@@ -73,6 +73,10 @@ const psg_port_hi: u24 = 0xC0_001F;
 /// sound driver reaches the PSG without asking the 68k for the bus.
 const z80_vdp_mask: u24 = 0x1F;
 
+/// A DMA's source counter is 17 bits wide and the bank above it is fixed, so
+/// a transfer that runs off the end of a 128 KiB bank comes back at its start.
+const dma_bank_mask: u32 = 0x1_FFFF;
+
 // Controller bits, active high here and inverted on the way out to the ROM.
 pub const btn_up: u8 = 0x01;
 pub const btn_down: u8 = 0x02;
@@ -85,7 +89,9 @@ pub const btn_start: u8 = 0x80;
 
 pub const Genesis = struct {
     rom: []const u8,
-    cpu: *const Cpu,
+    /// Mutable because the VDP stalls it: a full FIFO or a DMA off the 68k
+    /// bus holds the CPU by pushing its cycle count forward.
+    cpu: *Cpu,
     ram: [ram_bytes]u8 = @splat(0),
     zram: [zram_bytes]u8 = @splat(0),
     v: vdp.Vdp = .{},
@@ -118,7 +124,12 @@ pub const Genesis = struct {
 
     frame: u32 = 0,
     line: u32 = 0,
-    /// Cycle count when the current scanline started, for the H counter.
+    /// Master clock at the start of the current scanline, counted from power
+    /// on and never reset: the VDP's whole notion of time is a position in
+    /// this (see `now`).
+    mclk: u64 = 0,
+    /// CPU cycle count when the current scanline started, which is what turns
+    /// the CPU's clock back into the master clock.
     line_start: u64 = 0,
     /// A scanline isn't a whole number of CPU cycles; the remainder is carried
     /// here so a frame comes out at the right length instead of 0.1% short.
@@ -142,6 +153,23 @@ pub const Genesis = struct {
     /// line boundary just like the 68000's.
     z80_over: u64 = 0,
 
+    // ------------------------------------------------------------------ clock
+
+    /// The master clock as the 68000 has run it: the line's start plus the
+    /// cycles it has executed into that line.
+    pub fn now(g: *const Genesis) u64 {
+        return g.mclk + (g.cpu.cycles -| g.line_start) * mclk_per_cpu;
+    }
+
+    /// Holds the 68000 off until `mclk` by charging it the cycles it would
+    /// have run in the meantime. `scheduler.zig`'s `cpu_over` carries the
+    /// overrun into the following lines, so a stall longer than a line works
+    /// out on its own.
+    fn stallUntil(g: *Genesis, mclk: u64) void {
+        const into_line = (mclk -| g.mclk + mclk_per_cpu - 1) / mclk_per_cpu;
+        g.cpu.cycles = @max(g.cpu.cycles, g.line_start + into_line);
+    }
+
     // -------------------------------------------------------------- memory map
 
     pub fn read8(g: *Genesis, addr: u24) u8 {
@@ -164,8 +192,8 @@ pub const Genesis = struct {
             0x00_0000...0x3F_FFFF => if (addr + 1 < g.rom.len) rd16(g.rom, addr) else 0xFFFF,
             0xA0_0000...0xA0_3FFF => rd16(&g.zram, addr & zram_mask),
             0xC0_0000...0xC0_0003 => g.v.readData(),
-            0xC0_0004...0xC0_0007 => g.v.readStatus(),
-            0xC0_0008...0xC0_000F => g.hvCounter(),
+            0xC0_0004...0xC0_0007 => g.v.readStatus(g.now()),
+            0xC0_0008...0xC0_000F => g.v.hvCounter(g.now()),
             0xE0_0000...0xFF_FFFF => rd16(&g.ram, addr & ram_mask),
             // Everything else on this bus is a byte-wide device, and answers
             // a word read with the same byte in both halves.
@@ -194,9 +222,9 @@ pub const Genesis = struct {
     pub fn write16(g: *Genesis, addr: u24, val: u16) void {
         switch (addr) {
             0xA0_0000...0xA0_3FFF => wr16(&g.zram, addr & zram_mask, val),
-            0xC0_0000...0xC0_0003 => g.v.writeData(val),
+            0xC0_0000...0xC0_0003 => g.stallUntil(g.v.writeData(g.now(), val)),
             0xC0_0004...0xC0_0007 => {
-                g.v.writeControl(val);
+                g.v.writeControl(g.now(), val);
                 if (g.v.dma_request) g.dmaFrom68k();
             },
             // The H/V counter is read-only, and swallowing the write here
@@ -211,31 +239,31 @@ pub const Genesis = struct {
     }
 
     /// The one DMA mode the VDP can't run on its own: its source is out here.
+    /// The 68000 is held for the whole of it, which is why a game can raise
+    /// DMA and read the result on the very next instruction.
     fn dmaFrom68k(g: *Genesis) void {
         g.v.dma_request = false;
         var src = g.v.dmaSource();
         var len = g.v.dmaLength();
+        const end = g.now() + g.v.dmaMclk(.transfer, len);
+        g.v.dmaBusyUntil(end);
         while (len > 0) : (len -= 1) {
-            g.v.writeTarget(g.read16(@truncate(src)));
-            // The source counter wraps inside its own 128 KiB bank.
-            src = (src & 0xFF_0000) | ((src + 2) & 0xFFFF);
+            g.v.busWrite(g.read16(@truncate(src)));
+            // The source counter wraps inside its own 128 KiB bank: only the
+            // low 17 bits count up.
+            src = (src & ~dma_bank_mask) | ((src + 2) & dma_bank_mask);
         }
         g.v.dmaDone();
+        g.stallUntil(end);
     }
 
     // --------------------------------------------------------------------- I/O
 
-    /// The H counter runs 0..$FF across a line here rather than the real
-    /// blanking-aware ramp; games use it as an entropy source, not a clock.
-    fn hvCounter(g: *Genesis) u16 {
-        const into_line = g.cpu.cycles -| g.line_start;
-        const h: u16 = @truncate(into_line * 256 / (mclk_per_line / mclk_per_cpu));
-        return @as(u16, @truncate(g.line)) << 8 | (h & 0xFF);
-    }
-
     fn ioRead(g: *Genesis, addr: u24) u8 {
         return switch (addr & 0x1F) {
-            0x01 => 0xA0, // export, NTSC, no expansion, VA0
+            // Export (not Japanese), no expansion, VA0 — and the region's
+            // own bit, which is the one a game reads to pick its timing.
+            0x01 => if (g.v.pal) 0xE0 else 0xA0,
             0x03 => g.padByte(),
             0x05, 0x07 => if (g.pad_ctrl & th_bit != 0) 0x7F else 0x3F, // no pad 2 or 3
             0x09 => g.pad_ctrl,
@@ -410,6 +438,7 @@ test "Z80 sees its own RAM mirrored across 0x0000-0x3FFF" {
 test "Z80's VDP window lands on the same VRAM the 68k writes" {
     var c = Cpu{};
     var g = Genesis{ .rom = &.{}, .cpu = &c };
+    g.write16(0xC00004, 0x8104); // mode 5, which is where two-word writes exist
     g.write16(0xC00004, 0x4000); // VRAM write mode
     g.write16(0xC00004, 0x0003); // address 0xC000 (see vdp.zig's own control-port test)
 
@@ -444,7 +473,7 @@ test "a word write to the read-only H/V counter is swallowed, not bounced" {
     var g = Genesis{ .rom = &.{}, .cpu = &c };
 
     g.write16(0xC0_0008, 0xBEEF);
-    try testing.expectEqual(@as(u16, 0), g.hvCounter());
+    try testing.expectEqual(@as(u16, 0), g.read16(0xC0_0008));
 }
 
 test "version register reports export, NTSC, no expansion" {
@@ -497,18 +526,36 @@ test "controller: TH configured as an input always reads the TH-high state" {
     try testing.expectEqual(@as(u8, 0), got & btn_up);
 }
 
-test "hvCounter reports the line in the high byte and ramps through it in the low byte" {
+test "the H/V counter port reads the master clock, not the CPU's own cycles" {
     var c = Cpu{ .cycles = 100 };
     var g = Genesis{ .rom = &.{}, .cpu = &c };
-    g.line = 5;
-    g.line_start = 100; // the line just started
+    g.mclk = 5 * mclk_per_line; // line 5, and the line just started
+    g.line_start = 100;
 
-    try testing.expectEqual(@as(u16, 5 << 8), g.hvCounter());
+    try testing.expectEqual(@as(u16, 5 << 8), g.read16(0xC0_0008));
 
-    c.cycles = 100 + (mclk_per_line / mclk_per_cpu) / 2; // halfway through the line
-    const mid = g.hvCounter();
+    c.cycles = 100 + (mclk_per_line / mclk_per_cpu) / 2; // halfway through it
+    const mid = g.read16(0xC0_0008);
     try testing.expectEqual(@as(u8, 5), @as(u8, @truncate(mid >> 8)));
     try testing.expect(@as(u8, @truncate(mid)) > 0 and @as(u8, @truncate(mid)) < 0xFF);
+}
+
+test "a full FIFO stalls the 68000 until the oldest write has drained" {
+    var c = Cpu{ .cycles = 100 };
+    var g = Genesis{ .rom = &.{}, .cpu = &c };
+    g.line_start = 100;
+    g.v.regs[1] = 0x54; // display on, mode 5
+
+    g.write16(0xC0_0004, 0x4000); // VRAM write at 0
+    g.write16(0xC0_0004, 0x0000);
+    for (0..4) |_| g.write16(0xC0_0000, 0xFFFF);
+    try testing.expectEqual(@as(u64, 100), c.cycles); // four fit; nothing waits
+
+    // The fifth is held until the oldest of the four reaches VRAM, on the
+    // second access slot of an active H32 line: 510 master clocks in (see
+    // vdp.zig's slot table), or 73 of the 68000's own cycles.
+    g.write16(0xC0_0000, 0xFFFF);
+    try testing.expectEqual(@as(u64, (510 + mclk_per_cpu - 1) / mclk_per_cpu), c.cycles - 100);
 }
 
 test "a full-volume PSG channel sits a fifth of a full-scale FM channel, as the board mixes them" {
