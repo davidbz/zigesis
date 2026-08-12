@@ -17,7 +17,7 @@ const std = @import("std");
 /// channel 256 * 3 * `fm_gain`, so a fifth of that peak-to-peak is 768 either
 /// side of zero. Matching that ratio is the whole point of the number —
 /// scaling the PSG to fill an i16 on its own (which is what 8191 did) leaves
-/// it 20 dB over the music, and Sonic 1's squares and hats drown the FM.
+/// it 20 dB over the music, and the squares and hats drown the FM.
 const max_amplitude = 768;
 const db_per_step = 2.0;
 const silent_atten: u4 = 15;
@@ -150,7 +150,7 @@ pub const Psg = struct {
 /// audible, which is the real reason a period-0 channel reads as DC — and
 /// keeps clocking the noise channel when noise runs off tone 3. Falling out
 /// of the counter with a reload value of 0 gives exactly that: a toggle
-/// every tick. Sonic 1's percussion is nothing but this.
+/// every tick. Most drivers' percussion is nothing but this.
 fn stepTone(period: u10, counter: *u10, output: *bool) bool {
     if (counter.* > 1) {
         counter.* -= 1;
@@ -214,7 +214,7 @@ test "tone period 0 is the highest frequency, not a stopped channel" {
 }
 
 test "noise clocked off tone 3 still shifts when tone 3's period is 0" {
-    // Sonic 1's percussion: channel 3 silent at period 0 purely as the noise
+    // The percussion idiom: channel 3 silent at period 0 purely as the noise
     // clock, white noise on channel 4, and a volume envelope on top. Freezing
     // that counter leaves the shift register stuck and turns every drum hit
     // into a DC click instead of a hi-hat.
@@ -258,9 +258,9 @@ test "the shift register advances once every two periods, off any clock source" 
         try testing.expectEqual(@as(u32, 2) * period, ticksPerShift(&p));
     }
 
-    // Clocked off tone 3 the same halving applies, which is the path Sonic 1's
-    // percussion takes: one shift per full cycle of that channel's square, not
-    // one per toggle.
+    // Clocked off tone 3 the same halving applies, which is the path drum
+    // patches take: one shift per full cycle of that channel's square, not one
+    // per toggle.
     var t = Psg{};
     soloChannel(&t, 3);
     t.write(latch_bit | (@as(u8, noise_ctrl_reg) << 4) | 0x04 | noise_rate_tone2);

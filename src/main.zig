@@ -38,7 +38,7 @@ const scale = 3;
 /// stretched to fill it. H32's 256 pixels and H40's 320 are the same width of
 /// glass, and so are 224 lines and 240.
 const window_w = vdp.max_width * scale;
-const window_h = 224 * scale;
+const window_h = vdp.height_v28 * scale;
 
 /// Only used when there's no audio device to pace against; NTSC's 262 lines of
 /// 3420 mclk are really 59.92 Hz, and raylib's timer can't express the fraction.
@@ -79,8 +79,9 @@ const Hasher = struct {
     audio: std.hash.Wyhash = .init(0),
     samples: u64 = 0,
 
-    fn takeAudio(h: *Hasher, g: *Genesis) void {
-        while (g.audio.pop()) |s| : (h.samples += 1) h.audio.update(std.mem.asBytes(&s));
+    fn take(h: *Hasher, s: audio.Frame) void {
+        h.audio.update(std.mem.asBytes(&s));
+        h.samples += 1;
     }
 
     fn report(h: *Hasher, g: *const Genesis, frames: u32) void {
@@ -253,11 +254,17 @@ pub fn main(init: std.process.Init) !void {
         // Headless: no window, no GL — ExportImage only touches the pixels.
         while (frames < n and !c.halted) : (frames += 1) {
             if (replay) |r| g.buttons = r.buttons(frames);
+            if (record) |*r| try r.append(gpa, g.buttons);
             scheduler.runFrame(g, &c);
             // Drained every frame so the fixed-size ring never drops a sample,
             // exactly as the windowed loop and the regression suite drain it.
-            if (want_hash) hasher.takeAudio(g);
-            if (wav_path != null) while (g.audio.pop()) |s| try pcm.append(gpa, s);
+            // One loop, however many consumers: draining per consumer means the
+            // first one to run empties the ring and every other one gets
+            // nothing. `--shot N --hash --wav out.wav` wrote a 44-byte WAV.
+            while (g.audio.pop()) |s| {
+                if (want_hash) hasher.take(s);
+                if (wav_path != null) try pcm.append(gpa, s);
+            }
         }
         if (want_hash) hasher.report(g, frames);
         if (wav_path) |p| {

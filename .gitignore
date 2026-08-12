@@ -15,7 +15,7 @@ zig-pkg/
 zig-cache/
 zig-out/
 
-# ROMs: commercial ROMs are never committed; free test ROMs are fetched by
+# ROMs are never committed; the free test ROMs are fetched by
 # tools/fetch_test_roms.sh.
 roms/
 
