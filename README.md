@@ -30,8 +30,13 @@ for the full plan and acceptance criteria):
   sample by sample against Nuked-OPN2: exact on operators, detune, LFO,
   panning and DAC, within 0.04% on the algorithms, within 0.14 dB on
   envelope sweeps. Music and DAC drums play.
-- **M4 and later** (VDP completion, save states, debug tooling,
-  compatibility pass) are not started.
+- **M4 — VDP completion: done.** Ports first: a real FIFO driving the status
+  bits, DMA metered off the access-slot budget, the full read-target matrix,
+  the HV counter latch, VSRAM caching. Then rendering: H32, shadow/highlight,
+  both interlace modes, per-line sprite and pixel limits with X=0 masking, and
+  PAL V30 timing. VDPFIFOTesting scores 111 of 122 (see `DESIGN.md` section 9).
+- **M5 and later** (save states, debug tooling, compatibility pass) are not
+  started.
 
 ## Requirements
 
@@ -57,9 +62,8 @@ zig build          # build the zigesis executable into zig-out/bin/
 
 ## Running
 
-zigesis needs a Genesis ROM image; it does not ship with one. Commercial ROMs
-are never distributed by this project — supply your own legally obtained
-copy.
+zigesis needs a Genesis ROM image; it does not ship with one and never
+distributes one — supply your own legally obtained copy.
 
 ```
 zig build run -Doptimize=ReleaseFast -- path/to/rom.bin

@@ -3,11 +3,9 @@
 //! the CPUs and VDP. Frame timing and interrupt delivery live in
 //! `scheduler.zig`; this file only answers bus reads and writes.
 //!
-//! Both sound chips run for real (`psg.zig` and `ym2612.zig`, stepped by
-//! `scheduler.zig` into the `audio` mixer this struct owns). The Z80 runs
-//! for real too, with its
-//! own memory map, BUSREQ/RESET handshake, and banked window onto this same
-//! 68k bus.
+//! This struct owns every chip by value, including the `audio` mixer both
+//! sound chips push into. The Z80 has its own memory map here, plus the
+//! BUSREQ/RESET handshake and the banked window onto this same 68k bus.
 
 const std = @import("std");
 const m68k = @import("m68k");
@@ -53,9 +51,50 @@ pub const ym_rate = audio.Rate{
     .in = master_clock_hz,
 };
 
+/// The 68000's memory map (DESIGN.md §3.3). Each range is the whole block the
+/// bus decodes for that device, mirrors and all, so the switches below read as
+/// names rather than as addresses.
+const rom_lo: u24 = 0x00_0000;
+const rom_hi: u24 = 0x3F_FFFF;
+const zram_lo: u24 = 0xA0_0000;
+const zram_hi: u24 = 0xA0_3FFF;
 /// The YM2612's four ports, mirrored across the block the 68k decodes for it.
 const ym_port_lo: u24 = 0xA0_4000;
 const ym_port_hi: u24 = 0xA0_5FFF;
+const io_lo: u24 = 0xA1_0000;
+const io_hi: u24 = 0xA1_001F;
+const busreq_lo: u24 = 0xA1_1100;
+const busreq_hi: u24 = 0xA1_11FF;
+const z80_reset_lo: u24 = 0xA1_1200;
+const z80_reset_hi: u24 = 0xA1_12FF;
+/// The VDP's three port pairs, each mirrored once inside the 16 bytes.
+const vdp_data_lo: u24 = 0xC0_0000;
+const vdp_data_hi: u24 = 0xC0_0003;
+const vdp_ctrl_lo: u24 = 0xC0_0004;
+const vdp_ctrl_hi: u24 = 0xC0_0007;
+const vdp_hv_lo: u24 = 0xC0_0008;
+const vdp_hv_hi: u24 = 0xC0_000F;
+/// The PSG's write-only port, $C00011, and the rest of the VDP block it
+/// decodes over.
+const psg_port_lo: u24 = 0xC0_0010;
+const psg_port_hi: u24 = 0xC0_001F;
+const ram_lo: u24 = 0xE0_0000;
+const ram_hi: u24 = 0xFF_FFFF;
+
+/// The Z80's own map: 8 KiB of RAM mirrored to $3FFF, the YM2612, the
+/// write-only bank register, a 32-byte window onto the VDP block at $C00000
+/// (how a sound driver reaches the PSG without asking the 68k for the bus),
+/// and the banked window onto the 68k bus.
+const z80_ram_hi: u16 = 0x3FFF;
+const z80_ym_lo: u16 = 0x4000;
+const z80_ym_hi: u16 = 0x5FFF;
+const z80_bank_lo: u16 = 0x6000;
+const z80_bank_hi: u16 = 0x60FF;
+const z80_vdp_lo: u16 = 0x7F00;
+const z80_vdp_hi: u16 = 0x7FFF;
+const z80_vdp_mask: u24 = 0x1F;
+const z80_window_lo: u16 = 0x8000;
+const z80_window_hi: u16 = 0xFFFF;
 
 const ram_bytes = 64 << 10;
 const zram_bytes = 8 << 10;
@@ -64,14 +103,23 @@ const zram_mask = zram_bytes - 1;
 
 /// The controller's TH pin, bit 6 of both the data and control port bytes.
 const th_bit: u8 = 0x40;
+/// The six button bits a pad reports in one half of its multiplexed byte.
+const pad_bits: u8 = 0x3F;
 
-/// The PSG's write-only port, $C00011, and the rest of the VDP block it
-/// decodes over.
-const psg_port_lo: u24 = 0xC0_0010;
-const psg_port_hi: u24 = 0xC0_001F;
-/// The Z80's 32-byte window onto the VDP block at $C00000, which is how a
-/// sound driver reaches the PSG without asking the 68k for the bus.
-const z80_vdp_mask: u24 = 0x1F;
+/// I/O register offsets within the block at $A10000, all on odd addresses.
+const io_mask: u24 = 0x1F;
+const io_version: u24 = 0x01;
+const io_data1: u24 = 0x03;
+const io_data2: u24 = 0x05;
+const io_data3: u24 = 0x07;
+const io_ctrl1: u24 = 0x09;
+
+/// What $A10001 reports about the board. The PAL bit is the one a game reads
+/// to pick its timing; the rest say export (not Japanese), no expansion
+/// connected, and VA0-revision hardware.
+const version_export: u8 = 0x80;
+const version_pal: u8 = 0x40;
+const version_no_expansion: u8 = 0x20;
 
 /// A DMA's source counter is 17 bits wide and the bank above it is fixed, so
 /// a transfer that runs off the end of a 128 KiB bank comes back at its start.
@@ -174,27 +222,30 @@ pub const Genesis = struct {
 
     pub fn read8(g: *Genesis, addr: u24) u8 {
         return switch (addr) {
-            0x00_0000...0x3F_FFFF => if (addr < g.rom.len) g.rom[addr] else 0xFF,
-            0xA0_0000...0xA0_3FFF => g.zram[addr & zram_mask],
+            rom_lo...rom_hi => if (addr < g.rom.len) g.rom[addr] else 0xFF,
+            zram_lo...zram_hi => g.zram[addr & zram_mask],
             ym_port_lo...ym_port_hi => g.y.status(),
-            0xA1_0000...0xA1_001F => g.ioRead(addr),
+            io_lo...io_hi => g.ioRead(addr),
             // Bit 0 low means the 68k has the bus; this model grants it the
             // instant it's requested, so it only ever reads busreq back.
-            0xA1_1100...0xA1_11FF => if (g.z80_busreq) 0x00 else 0x01,
-            0xC0_0000...0xC0_000F => @truncate(g.read16(addr & ~@as(u24, 1)) >> @intCast(8 * (~addr & 1))),
-            0xE0_0000...0xFF_FFFF => g.ram[addr & ram_mask],
+            busreq_lo...busreq_hi => if (g.z80_busreq) 0x00 else 0x01,
+            vdp_data_lo...vdp_hv_hi => {
+                const w = g.read16(addr & ~@as(u24, 1));
+                return @truncate(if (addr & 1 != 0) w else w >> 8);
+            },
+            ram_lo...ram_hi => g.ram[addr & ram_mask],
             else => 0xFF,
         };
     }
 
     pub fn read16(g: *Genesis, addr: u24) u16 {
         return switch (addr) {
-            0x00_0000...0x3F_FFFF => if (addr + 1 < g.rom.len) rd16(g.rom, addr) else 0xFFFF,
-            0xA0_0000...0xA0_3FFF => rd16(&g.zram, addr & zram_mask),
-            0xC0_0000...0xC0_0003 => g.v.readData(),
-            0xC0_0004...0xC0_0007 => g.v.readStatus(g.now()),
-            0xC0_0008...0xC0_000F => g.v.hvCounter(g.now()),
-            0xE0_0000...0xFF_FFFF => rd16(&g.ram, addr & ram_mask),
+            rom_lo...rom_hi => if (addr + 1 < g.rom.len) rd16(g.rom, addr) else 0xFFFF,
+            zram_lo...zram_hi => rd16(&g.zram, addr & zram_mask),
+            vdp_data_lo...vdp_data_hi => g.v.readData(),
+            vdp_ctrl_lo...vdp_ctrl_hi => g.v.readStatus(g.now()),
+            vdp_hv_lo...vdp_hv_hi => g.v.hvCounter(g.now()),
+            ram_lo...ram_hi => rd16(&g.ram, addr & ram_mask),
             // Everything else on this bus is a byte-wide device, and answers
             // a word read with the same byte in both halves.
             else => @as(u16, g.read8(addr)) << 8 | g.read8(addr),
@@ -203,37 +254,37 @@ pub const Genesis = struct {
 
     pub fn write8(g: *Genesis, addr: u24, val: u8) void {
         switch (addr) {
-            0xA0_0000...0xA0_3FFF => g.zram[addr & zram_mask] = val,
-            0xA1_0000...0xA1_001F => g.ioWrite(addr, val),
+            zram_lo...zram_hi => g.zram[addr & zram_mask] = val,
+            io_lo...io_hi => g.ioWrite(addr, val),
             ym_port_lo...ym_port_hi => g.y.write(@truncate(addr), val),
-            0xA1_1100...0xA1_11FF => g.z80_busreq = val & 1 != 0,
-            0xA1_1200...0xA1_12FF => g.writeZ80Reset(val),
+            busreq_lo...busreq_hi => g.z80_busreq = val & 1 != 0,
+            z80_reset_lo...z80_reset_hi => g.writeZ80Reset(val),
             // A byte write to a VDP port still presents a full word, with the
             // byte in both halves.
-            0xC0_0000...0xC0_000F => g.write16(addr & ~@as(u24, 1), @as(u16, val) << 8 | val),
+            vdp_data_lo...vdp_hv_hi => g.write16(addr & ~@as(u24, 1), @as(u16, val) << 8 | val),
             // The PSG hangs off the low byte of the bus only, so it hears
             // $C00011 and ignores the even address beside it.
             psg_port_lo...psg_port_hi => if (addr & 1 != 0) g.p.write(val),
-            0xE0_0000...0xFF_FFFF => g.ram[addr & ram_mask] = val,
+            ram_lo...ram_hi => g.ram[addr & ram_mask] = val,
             else => {},
         }
     }
 
     pub fn write16(g: *Genesis, addr: u24, val: u16) void {
         switch (addr) {
-            0xA0_0000...0xA0_3FFF => wr16(&g.zram, addr & zram_mask, val),
-            0xC0_0000...0xC0_0003 => g.stallUntil(g.v.writeData(g.now(), val)),
-            0xC0_0004...0xC0_0007 => {
+            zram_lo...zram_hi => wr16(&g.zram, addr & zram_mask, val),
+            vdp_data_lo...vdp_data_hi => g.stallUntil(g.v.writeData(g.now(), val)),
+            vdp_ctrl_lo...vdp_ctrl_hi => {
                 g.v.writeControl(g.now(), val);
                 if (g.v.dma_request) g.dmaFrom68k();
             },
             // The H/V counter is read-only, and swallowing the write here
             // keeps it out of the `else` arm, which would bounce it back and
             // forth with `write8` forever.
-            0xC0_0008...0xC0_000F => {},
+            vdp_hv_lo...vdp_hv_hi => {},
             // Word writes reach the PSG too, and it still only sees D0-D7.
             psg_port_lo...psg_port_hi => g.p.write(@truncate(val)),
-            0xE0_0000...0xFF_FFFF => wr16(&g.ram, addr & ram_mask, val),
+            ram_lo...ram_hi => wr16(&g.ram, addr & ram_mask, val),
             else => g.write8(addr, @truncate(val >> 8)),
         }
     }
@@ -260,21 +311,21 @@ pub const Genesis = struct {
     // --------------------------------------------------------------------- I/O
 
     fn ioRead(g: *Genesis, addr: u24) u8 {
-        return switch (addr & 0x1F) {
-            // Export (not Japanese), no expansion, VA0 — and the region's
-            // own bit, which is the one a game reads to pick its timing.
-            0x01 => if (g.v.pal) 0xE0 else 0xA0,
-            0x03 => g.padByte(),
-            0x05, 0x07 => if (g.pad_ctrl & th_bit != 0) 0x7F else 0x3F, // no pad 2 or 3
-            0x09 => g.pad_ctrl,
+        return switch (addr & io_mask) {
+            io_version => version_export | version_no_expansion |
+                @as(u8, if (g.v.pal) version_pal else 0),
+            io_data1 => g.padByte(),
+            // Nothing is plugged into ports 2 and 3: every line floats high.
+            io_data2, io_data3 => if (g.pad_ctrl & th_bit != 0) th_bit | pad_bits else pad_bits,
+            io_ctrl1 => g.pad_ctrl,
             else => 0x00,
         };
     }
 
     fn ioWrite(g: *Genesis, addr: u24, val: u8) void {
-        switch (addr & 0x1F) {
-            0x03 => g.pad_data = val,
-            0x09 => g.pad_ctrl = val,
+        switch (addr & io_mask) {
+            io_data1 => g.pad_data = val,
+            io_ctrl1 => g.pad_ctrl = val,
             else => {},
         }
     }
@@ -285,10 +336,10 @@ pub const Genesis = struct {
         const th = g.pad_ctrl & th_bit == 0 or g.pad_data & th_bit != 0;
         const b = g.buttons;
         const low: u8 = if (th)
-            b & 0x3F // C B R L D U
+            b & pad_bits // C B R L D U
         else
             (b & (btn_up | btn_down)) | ((b & btn_a) >> 2) | ((b & btn_start) >> 2);
-        return (if (th) th_bit else 0) | (~low & 0x3F);
+        return (if (th) th_bit else 0) | (~low & pad_bits);
     }
 
     /// RESET pin semantics: while held (bit 0 clear), the Z80's registers
@@ -306,24 +357,28 @@ pub const Genesis = struct {
         return (@as(u24, g.z80_bank) << 15) | (addr & 0x7FFF);
     }
 
+    fn z80VdpAddr(addr: u16) u24 {
+        return vdp_data_lo | (@as(u24, addr) & z80_vdp_mask);
+    }
+
     pub fn z80Read8(g: *Genesis, addr: u16) u8 {
         return switch (addr) {
-            0x0000...0x3FFF => g.zram[addr & zram_mask],
-            0x4000...0x5FFF => g.y.status(),
-            0x7F00...0x7FFF => g.read8(@as(u24, addr) & z80_vdp_mask | 0xC0_0000),
-            0x8000...0xFFFF => g.read8(g.z80BankAddr(addr)),
+            0...z80_ram_hi => g.zram[addr & zram_mask],
+            z80_ym_lo...z80_ym_hi => g.y.status(),
+            z80_vdp_lo...z80_vdp_hi => g.read8(z80VdpAddr(addr)),
+            z80_window_lo...z80_window_hi => g.read8(g.z80BankAddr(addr)),
             else => 0xFF,
         };
     }
 
     pub fn z80Write8(g: *Genesis, addr: u16, val: u8) void {
         switch (addr) {
-            0x0000...0x3FFF => g.zram[addr & zram_mask] = val,
-            0x4000...0x5FFF => g.y.write(@truncate(addr), val),
+            0...z80_ram_hi => g.zram[addr & zram_mask] = val,
+            z80_ym_lo...z80_ym_hi => g.y.write(@truncate(addr), val),
             // Loaded LSB-first: each write shifts the new bit into bit 8.
-            0x6000...0x60FF => g.z80_bank = (g.z80_bank >> 1) | (@as(u9, val & 1) << 8),
-            0x7F00...0x7FFF => g.write8(@as(u24, addr) & z80_vdp_mask | 0xC0_0000, val),
-            0x8000...0xFFFF => g.write8(g.z80BankAddr(addr), val),
+            z80_bank_lo...z80_bank_hi => g.z80_bank = (g.z80_bank >> 1) | (@as(u9, val & 1) << 8),
+            z80_vdp_lo...z80_vdp_hi => g.write8(z80VdpAddr(addr), val),
+            z80_window_lo...z80_window_hi => g.write8(g.z80BankAddr(addr), val),
             else => {},
         }
     }
@@ -592,7 +647,7 @@ test "a full-volume PSG channel sits a fifth of a full-scale FM channel, as the 
     // Genesis Plus GX puts a PSG channel at 2800 against ±8192 per FM channel
     // (0.17), BlastEm at 2340 against ±5372 (0.22); both are matched against a
     // real board. Anywhere in that neighbourhood is right, ten times over it
-    // is the bug this pins: the PSG drowning the music in Sonic 1.
+    // is the bug this pins: the PSG drowning out the music.
     const ratio = @as(f64, @floatFromInt(psg_pp)) / @as(f64, @floatFromInt(fm_pp));
     try testing.expect(ratio > 0.15 and ratio < 0.30);
 }

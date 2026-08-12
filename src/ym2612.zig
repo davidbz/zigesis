@@ -28,6 +28,11 @@ pub const clocks_per_sample = 144;
 /// A data write holds the busy flag for 32 internal cycles. Drivers poll it.
 const busy_clocks = 32 * 6;
 
+/// Status register bits; every port in the block answers with them.
+const st_busy: u8 = 0x80;
+const st_timer_b: u8 = 0x02;
+const st_timer_a: u8 = 0x01;
+
 /// Operator index within a channel, in the order the chip walks them — which
 /// is also the order the registers number them: S1, S3, S2, S4.
 const s1 = 0;
@@ -314,13 +319,11 @@ pub const Ym2612 = struct {
         y.writeReg(val);
     }
 
-    /// Busy in bit 7, the two timer overflow flags in bits 1 and 0. The
-    /// YM2612 answers every port in the block with it.
     pub fn status(y: *const Ym2612) u8 {
         var v: u8 = 0;
-        if (y.busy != 0) v |= 0x80;
-        if (y.timer_b_flag) v |= 0x02;
-        if (y.timer_a_flag) v |= 0x01;
+        if (y.busy != 0) v |= st_busy;
+        if (y.timer_b_flag) v |= st_timer_b;
+        if (y.timer_a_flag) v |= st_timer_a;
         return v;
     }
 
@@ -498,9 +501,9 @@ pub const Ym2612 = struct {
     /// -1 to +1, and it drives the channel's real value on only one of those
     /// four cycles, parking on the sign for the other three. That crossover
     /// gap is the "ladder effect" — inaudible at full volume, unmistakable on
-    /// the quiet PCM in Streets of Rage. The YM3438 in later consoles drives
-    /// three of the four cycles properly and has no gap, which is why both
-    /// paths come out at the same amplitude.
+    /// quiet PCM. The YM3438 in later consoles drives three of the four cycles
+    /// properly and has no gap, which is why both paths come out at the same
+    /// amplitude.
     fn dacLevel(y: *const Ym2612, out: i16, panned: bool) i32 {
         if (!y.ladder) return if (panned) @as(i32, out) * driven_slots else 0;
 
@@ -939,16 +942,16 @@ test "channel 6 in DAC mode plays the byte it is fed, not its operators" {
 
 test "a data write reports busy until the chip has had 32 internal cycles" {
     var y = Ym2612{};
-    try testing.expectEqual(@as(u8, 0), y.status() & 0x80);
+    try testing.expectEqual(@as(u8, 0), y.status() & st_busy);
 
     y.write(0, 0x22);
-    try testing.expectEqual(@as(u8, 0), y.status() & 0x80); // address writes do not
+    try testing.expectEqual(@as(u8, 0), y.status() & st_busy); // address writes do not
     y.write(1, 0x00);
-    try testing.expectEqual(@as(u8, 0x80), y.status() & 0x80);
+    try testing.expectEqual(st_busy, y.status() & st_busy);
 
     _ = y.step();
     _ = y.step();
-    try testing.expectEqual(@as(u8, 0), y.status() & 0x80);
+    try testing.expectEqual(@as(u8, 0), y.status() & st_busy);
 }
 
 test "timer A overflows after (1024 - period) samples and latches its flag" {
@@ -962,13 +965,13 @@ test "timer A overflows after (1024 - period) samples and latches its flag" {
     y.write(1, 0x05); // load and enable timer A
 
     for (0..1023 - period) |_| _ = y.step();
-    try testing.expectEqual(@as(u8, 0), y.status() & 0x01);
+    try testing.expectEqual(@as(u8, 0), y.status() & st_timer_a);
     _ = y.step();
-    try testing.expectEqual(@as(u8, 0x01), y.status() & 0x01);
+    try testing.expectEqual(st_timer_a, y.status() & st_timer_a);
 
     y.write(0, 0x27);
     y.write(1, 0x15); // reset the flag
-    try testing.expectEqual(@as(u8, 0), y.status() & 0x01);
+    try testing.expectEqual(@as(u8, 0), y.status() & st_timer_a);
 }
 
 test "timer B counts one sample in sixteen" {
@@ -980,9 +983,9 @@ test "timer B counts one sample in sixteen" {
 
     // (256 - 254) ticks of sixteen samples each.
     for (0..2 * 16 - 1) |_| _ = y.step();
-    try testing.expectEqual(@as(u8, 0), y.status() & 0x02);
+    try testing.expectEqual(@as(u8, 0), y.status() & st_timer_b);
     _ = y.step();
-    try testing.expectEqual(@as(u8, 0x02), y.status() & 0x02);
+    try testing.expectEqual(st_timer_b, y.status() & st_timer_b);
 }
 
 test "key off releases the envelope back to silence" {

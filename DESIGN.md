@@ -13,9 +13,9 @@ architectural state, cycle counts, and data-space bus cycles). This project
 supplies the rest of the machine and a small, polished desktop frontend.
 
 A proof of concept already exists on the `genesis` branch of z68k
-(`examples/genesis.zig`, `examples/genesis_vdp.zig`) and boots commercial
-games with per-scanline video, controller input, interrupts, and frame
-timing. Treat it as reference-quality starting material, not throwaway code.
+(`examples/genesis.zig`, `examples/genesis_vdp.zig`) and boots retail
+cartridge images with per-scanline video, controller input, interrupts, and
+frame timing. Treat it as reference-quality starting material, not throwaway code.
 
 Reference PoC: https://github.com/davidbz/z68k/tree/genesis
 
@@ -49,13 +49,12 @@ Deliberately stubbed in the PoC, i.e. the actual work of this project:
 - Audio output of any kind (done in M2).
 - VDP rendering: shadow/highlight, interlace, H32 mode (256px), per-line
   sprite/pixel limits, sprite masking, PAL (V30/240-line) timing (done in M4).
-- VDP port and DMA timing (done in M4): there is no FIFO, so the status register's
-  empty/full/DMA-busy bits are constants; DMA of every mode completes
-  instantly with no bus locking and no slot stealing; fill reaches VRAM only;
-  reads from most code values return 0; there is no HV counter latch and no
-  VSRAM data cache. This is invisible to games that only write during vblank
-  and fatal to the ones that do not, and it is what M4's conformance half is
-  for.
+- VDP port and DMA timing (done in M4): there is no FIFO, so the status
+  register's empty/full/DMA-busy bits are constants; DMA of every mode
+  completes instantly with no bus locking and no slot stealing; fill reaches
+  VRAM only; reads from most code values return 0; there is no HV counter
+  latch and no VSRAM data cache. This is invisible to games that only write
+  during vblank and fatal to the ones that do not.
 - Save states, SRAM cartridge saves, mappers, options UI, key configuration.
 
 ## 3. Architecture
@@ -297,7 +296,7 @@ accuracy cliffs. Key facts and traps:
   audibility: correct clock divider (a wrong divider sounds like a chipmunk
   soundtrack and has bitten other emulator authors), envelope rate scaling,
   the "ladder effect" DAC distortion (the discrete YM2612's non-linear gap
-  around zero, prominent in low-volume PCM; famous in Streets of Rage),
+  around zero, prominent in low-volume PCM),
   SSG-EG envelopes (used by a handful of drivers), busy-flag timing.
   Strategy: implement a straightforward operator/envelope/phase-generator
   core from the documented behavior, validate against Nuked-OPN2 output on
@@ -324,8 +323,8 @@ accuracy cliffs. Key facts and traps:
 - Cartridge SRAM: parse the standard header (0x1B0-0x1BF) for SRAM
   presence/range; back it with a file written on exit and on a debounced
   timer. EEPROM carts are out of scope initially; log and continue.
-- Mappers: plain =< 4 MiB ROMs need none. The Super Street Fighter II
-  banking mapper (0xA130F3-0xA130FF) is the only one worth adding, and only
+- Mappers: plain =< 4 MiB ROMs need none. The 0xA130F3-0xA130FF banking
+  mapper the few oversized carts use is the only one worth adding, and only
   in a late milestone.
 - TMSS: later-model consoles require "SEGA" written to 0xA14000; ship with
   TMSS off (no BIOS), but accept and ignore the writes.
@@ -343,7 +342,7 @@ milestone per PR-chain, small PRs within it.
 Deliverables: new repo consuming z68k and raylib as dependencies; PoC code
 ported into the `src/` layout of section 3.1 unchanged in behavior; headless
 frame-hash test runner; CI (build, fmt, tests) on Linux/macOS/Windows.
-Acceptance: commercial games boot and play as in the PoC; `zig build test`
+Acceptance: retail cartridge images boot and play as in the PoC; `zig build test`
 boots a freely distributable homebrew ROM headless and matches pinned frame
 hashes; no raylib symbol is reachable from emulation modules.
 
@@ -390,7 +389,7 @@ resampled samples for a scripted input log) passes.
 `src/psg.zig` is a from-scratch SN76489: three tone channels plus noise,
 white and periodic LFSR modes, noise clocked either off a fixed divider or
 off tone channel 2, the Sega variant's tone-period-0 behaviour (counter
-loaded with 1, not stopped — Sonic 1's percussion clocks its noise off a
+loaded with 1, not stopped — drum patches clock their noise off a
 period-0 tone 3), a shift register that advances on the rising edge of the
 noise generator's square alone (so the noise runs at half the rate its period
 suggests), and a comptime 2 dB attenuation table scaled against the FM's level
@@ -438,7 +437,7 @@ wide, and the pinned frame hashes moved with the fix.
 Deliverables: FM core (phase generator, envelope generator, operators,
 algorithms, LFO, timers, channel 6 DAC mode); stereo panning; ladder-effect
 option; per-channel mute (debug); integration at the correct divider.
-Acceptance: well-known FM-heavy commercial soundtracks are recognizably
+Acceptance: FM-heavy soundtracks are recognizably
 correct in pitch, tempo, and instrument character; DAC drums/voices play;
 register-log comparison against Nuked-OPN2 shows matching envelope shapes
 on a test bank; audio regression hashes pinned.
@@ -640,13 +639,12 @@ re-running VDPFIFOTesting: still **111 of 122**, the same eleven failures, so
 none of this disturbed the ports.
 
 The acceptance suite above asks for pinned hashes across ten games, and §2
-forbids committing or fetching a commercial ROM: the two cannot both hold.
-What is pinned in `test/system_test.zig` is the two ROMs the fetch script can
-get — Cave Story MD at four checkpoints and VDPFIFOTesting page 1. The rest
-was checked by eye against locally-owned ROMs (Sonic 1, Alien Soldier,
-Aladdin, Mortal Kombat II, Eternal Champions, Streets of Rage 2) and is not
-in the suite, because a hash nobody else can reproduce is not a regression
-test.
+forbids committing or fetching a ROM that cannot be redistributed: the two
+cannot both hold. What is pinned in `test/system_test.zig` is the two ROMs
+the fetch script can get — Cave Story MD at four checkpoints and
+VDPFIFOTesting page 1. The rest was checked by eye against locally-owned
+cartridge images and is not in the suite, because a hash nobody else can
+reproduce is not a regression test.
 
 Ceilings worth naming, all in `vdp.zig`:
 
@@ -672,11 +670,12 @@ the snow idles at negligible CPU.
 ### M6: Save states and cartridge persistence
 
 Deliverables: versioned save states with slots, menu entries, and hotkeys;
-SRAM saves with header parsing; SSF2 mapper; TMSS write acceptance.
+SRAM saves with header parsing; the 0xA130F3 banking mapper; TMSS write
+acceptance.
 Acceptance: save/load round-trips mid-gameplay are bit-identical under the
 deterministic replay harness (save, run N frames, load, run N frames,
-identical hashes); an SRAM-backed game retains progress across restarts;
-Super Street Fighter II boots and switches banks.
+identical hashes); an SRAM-backed game retains progress across restarts; a
+bank-switched cart boots and switches banks.
 
 ### M7: Debug tooling
 
@@ -705,7 +704,7 @@ every remaining issue has a reproduction via the replay harness.
   Nemesis's VDPFIFOTesting, the 240p Test Suite, MDFourier for audio
   comparison against real-hardware recordings, and community sprite/scroll
   stress ROMs.
-- Commercial ROMs are never committed or fetched; tests that need them
+- Non-redistributable ROMs are never committed or fetched; tests that need them
   skip cleanly when the file is absent, exactly as z68k's SST suite does.
 
 ## 11. References

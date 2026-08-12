@@ -26,7 +26,9 @@ pub const max_height = 480;
 
 const width_h32 = 256;
 const width_h40 = 320;
-const height_v28 = 224;
+/// Public because the frontend sizes its window off the ordinary NTSC picture,
+/// whatever mode the machine is actually in.
+pub const height_v28 = 224;
 const height_v30 = 240;
 
 /// The VDP's own clock: 3420 master clocks a line, 262 lines a frame (NTSC),
@@ -37,6 +39,7 @@ pub const lines_per_frame = 262;
 const lines_per_frame_pal = 313;
 
 const vram_size = 0x10000;
+const vram_mask = vram_size - 1;
 /// 64 nine-bit colours, held here in the bus's BBB0GGG0RRR0 packing.
 const cram_entries = 64;
 const cram_mask = cram_entries - 1;
@@ -136,6 +139,19 @@ const vc_max_pal_v30: u32 = 0x10A;
 /// CRAM holds 3 bits per channel; the DAC's ladder is not linear.
 const level: [8]u8 = .{ 0, 52, 87, 116, 144, 172, 206, 255 };
 
+/// A name-table entry and a sprite's attribute word share this layout.
+const attr_pattern: u16 = 0x07FF;
+const attr_hflip: u16 = 0x0800;
+const attr_vflip: u16 = 0x1000;
+const attr_palette: u16 = 0x6000;
+const attr_palette_shift = 13;
+const attr_priority: u16 = 0x8000;
+
+/// Palette 3's last two colours, which shadow/highlight mode turns from
+/// colours into operators on the pixel underneath.
+const op_highlight: u8 = 0x3E;
+const op_shadow: u8 = 0x3F;
+
 /// One layer's contribution to a pixel: a 6-bit CRAM index plus its priority
 /// bit. An index whose low nibble is zero is transparent.
 const Pix = struct {
@@ -146,6 +162,12 @@ const Pix = struct {
         return p.pal & 0xF != 0;
     }
 };
+
+/// The CRAM index a pattern's colour lands on: the attribute word picks one of
+/// the four 16-colour palettes.
+fn palIndex(attr: u16, c: u8) u8 {
+    return @as(u8, @truncate((attr & attr_palette) >> attr_palette_shift)) << 4 | c;
+}
 
 pub const Vdp = struct {
     vram: [vram_size]u8 = @splat(0),
@@ -219,6 +241,17 @@ pub const Vdp = struct {
     }
     pub fn hintReload(v: *const Vdp) u8 {
         return v.regs[10];
+    }
+    fn dmaEnabled(v: *const Vdp) bool {
+        return v.regs[1] & 0x10 != 0;
+    }
+    /// Shadow/highlight mode, which costs every pixel a brightness decision.
+    fn shadowHighlight(v: *const Vdp) bool {
+        return v.regs[12] & 0x08 != 0;
+    }
+    /// The CRAM entry drawn wherever no layer is visible.
+    fn backdrop(v: *const Vdp) u8 {
+        return v.regs[7] & 0x3F;
     }
     /// 320 pixels across instead of 256, which changes the access-slot budget
     /// and the H counter along with the picture.
@@ -318,7 +351,7 @@ pub const Vdp = struct {
             v.addr = v.addr_latch | (v.addr & 0x3FFF);
             v.code = @truncate((v.code & 0x03) | ((val >> 2) & 0x3C));
             // Bit 5 of the code asks for DMA; reg 1 bit 4 has to allow it.
-            if (v.code & 0x20 != 0 and v.regs[1] & 0x10 != 0) v.startDma(now);
+            if (v.code & 0x20 != 0 and v.dmaEnabled()) v.startDma(now);
             return;
         }
         // The first word lands in the address and code registers on its own,
@@ -614,10 +647,10 @@ pub const Vdp = struct {
     /// twice the pattern for the same 64 KiB, so the index loses a bit.
     fn patternPixel(v: *const Vdp, index: u16, x: u32, y: u32) u8 {
         const base: u32 = if (v.im2())
-            (@as(u32, index) & 0x3FF) * 64
+            (@as(u32, index) & (attr_pattern >> 1)) * 64
         else
-            (@as(u32, index) & 0x7FF) * 32;
-        const b = v.vram[(base + y * 4 + x / 2) & 0xFFFF];
+            (@as(u32, index) & attr_pattern) * 32;
+        const b = v.vram[(base + y * 4 + x / 2) & vram_mask];
         return if (x & 1 == 0) b >> 4 else b & 0xF;
     }
 
@@ -627,10 +660,10 @@ pub const Vdp = struct {
         const e = v.word(entry_addr);
         const rows: u32 = if (v.im2()) 16 else 8;
         const py = if (v.im2()) y * 2 + @intFromBool(v.odd) else y;
-        const tx = if (e & 0x800 != 0) 7 - x else x;
-        const ty = if (e & 0x1000 != 0) rows - 1 - py else py;
+        const tx = if (e & attr_hflip != 0) 7 - x else x;
+        const ty = if (e & attr_vflip != 0) rows - 1 - py else py;
         const c = v.patternPixel(e, tx, ty);
-        return .{ .pal = @as(u8, @truncate(e >> 13 & 3)) << 4 | c, .pri = e & 0x8000 != 0 };
+        return .{ .pal = palIndex(e, c), .pri = e & attr_priority != 0 };
     }
 
     /// One dimension of the plane-size register (16), in cells. 2 is an
@@ -710,7 +743,7 @@ pub const Vdp = struct {
             // position too, so its Y is in fields rather than lines.
             const ypos = v.word(e) & @as(u16, if (v.im2()) 0x3FF else 0x1FF);
             const top = @as(i32, if (v.im2()) ypos >> 1 else ypos) - 128;
-            const sz = v.vram[(e + 2) & 0xFFFF];
+            const sz = v.vram[(e + 2) & vram_mask];
             const cells_w: u32 = (sz >> 2 & 3) + 1;
             const cells_h: u32 = (sz & 3) + 1;
             const dy = @as(i32, @intCast(line)) - top;
@@ -731,7 +764,7 @@ pub const Vdp = struct {
                     break;
                 }
             }
-            link = v.vram[(e + 3) & 0xFFFF] & 0x7F;
+            link = v.vram[(e + 3) & vram_mask] & 0x7F;
             if (link == 0) break;
         }
     }
@@ -746,18 +779,17 @@ pub const Vdp = struct {
         out: []Pix,
         budget: u32,
     ) void {
-        const first: u16 = @truncate(attr & 0x7FF);
-        const pal: u8 = @as(u8, @truncate(attr >> 13 & 3)) << 4;
-        const pri = attr & 0x8000 != 0;
+        const first: u16 = attr & attr_pattern;
+        const pri = attr & attr_priority != 0;
         const cell_rows: u32 = if (v.im2()) 16 else 8;
         const py = if (v.im2()) dy * 2 + @intFromBool(v.odd) else dy;
-        const row = if (attr & 0x1000 != 0) cells_h * cell_rows - 1 - py else py;
+        const row = if (attr & attr_vflip != 0) cells_h * cell_rows - 1 - py else py;
 
         // The budget cuts the sprite off mid-way, on- or off-screen alike:
         // the fetcher spends its pixels either way.
         for (0..@min(cells_w * 8, budget)) |i| {
             const sx = left + @as(i32, @intCast(i));
-            const col: u32 = if (attr & 0x800 != 0) cells_w * 8 - 1 - @as(u32, @intCast(i)) else @intCast(i);
+            const col: u32 = if (attr & attr_hflip != 0) cells_w * 8 - 1 - @as(u32, @intCast(i)) else @intCast(i);
             // Sprite tiles run down each column before moving right.
             const tile = first +% @as(u16, @truncate(col / 8 * cells_h + row / cell_rows));
             const c = v.patternPixel(tile, col & 7, row % cell_rows);
@@ -768,8 +800,39 @@ pub const Vdp = struct {
                 v.sprite_collision = true;
                 continue;
             }
-            dst.* = .{ .pal = pal | c, .pri = pri };
+            dst.* = .{ .pal = palIndex(attr, c), .pri = pri };
         }
+    }
+
+    /// Which layer owns the pixel: sprites over plane A over plane B, high
+    /// priority before low, the backdrop when nothing is visible at all.
+    fn topPixel(v: *const Vdp, layers: [3]Pix) u8 {
+        for (layers) |p| if (p.visible() and p.pri) return p.pal;
+        for (layers) |p| if (p.visible()) return p.pal;
+        return v.backdrop();
+    }
+
+    /// A pixel no plane claims priority on is drawn at half brightness, and
+    /// palette 3's last two colours stop being colours: they operate on the
+    /// pixel underneath and are not themselves drawn, which is why `sprite` is
+    /// taken by pointer. A high-priority sprite pixel is always full brightness.
+    fn shadeOf(on: bool, ca: Pix, cb: Pix, sprite: *Pix) Shade {
+        if (!on) return .normal;
+        const dim: Shade = if (ca.pri or cb.pri) .normal else .shadow;
+        switch (sprite.pal) {
+            op_highlight => {
+                sprite.* = .{};
+                return if (dim == .shadow) .normal else .highlight;
+            },
+            // Shadowing an already-shadowed pixel changes nothing.
+            op_shadow => {
+                sprite.* = .{};
+                return .shadow;
+            },
+            else => {},
+        }
+        if (sprite.visible() and sprite.pri) return .normal;
+        return dim;
     }
 
     pub fn renderLine(v: *Vdp, line: u32) void {
@@ -779,7 +842,7 @@ pub const Vdp = struct {
         const y = if (v.im2()) line * 2 + @intFromBool(v.odd) else line;
         const row = v.fb[y * max_width ..][0..w];
         if (!v.displayOn()) {
-            @memset(row, v.color(v.regs[7] & 0x3F, .normal));
+            @memset(row, v.color(v.backdrop(), .normal));
             return;
         }
 
@@ -794,42 +857,11 @@ pub const Vdp = struct {
         v.applyWindow(line, a);
         v.spriteRow(line, s);
 
-        const sh = v.regs[12] & 0x08 != 0;
+        const sh = v.shadowHighlight();
         for (row, a, b, s) |*out, ca, cb, cs| {
-            // Shadow/highlight: a pixel no plane claims priority on is drawn
-            // at half brightness, and the last two colours of the last sprite
-            // palette stop being colours and become operators on it. A
-            // high-priority sprite pixel is always at full brightness.
-            var shade: Shade = if (!sh or ca.pri or cb.pri) .normal else .shadow;
             var sprite = cs;
-            if (sh) switch (sprite.pal) {
-                0x3E => {
-                    shade = if (shade == .shadow) .normal else .highlight;
-                    sprite = .{};
-                },
-                0x3F => {
-                    shade = if (shade == .highlight) .normal else .shadow;
-                    sprite = .{};
-                },
-                else => if (sprite.visible() and sprite.pri) {
-                    shade = .normal;
-                },
-            };
-
-            out.* = if (sprite.visible() and sprite.pri)
-                v.color(sprite.pal, shade)
-            else if (ca.visible() and ca.pri)
-                v.color(ca.pal, shade)
-            else if (cb.visible() and cb.pri)
-                v.color(cb.pal, shade)
-            else if (sprite.visible())
-                v.color(sprite.pal, shade)
-            else if (ca.visible())
-                v.color(ca.pal, shade)
-            else if (cb.visible())
-                v.color(cb.pal, shade)
-            else
-                v.color(v.regs[7] & 0x3F, shade);
+            const shade = shadeOf(sh, ca, cb, &sprite);
+            out.* = v.color(v.topPixel(.{ sprite, ca, cb }), shade);
         }
     }
 };
