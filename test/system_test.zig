@@ -30,10 +30,10 @@ const Checkpoint = struct { frame: u32, expected: u64 };
 /// thing here as `--shot N` does on the command line and the pinned values can
 /// be regenerated with `zigesis <rom> --replay <log> --shot N --hash`.
 const checkpoints = [_]Checkpoint{
-    .{ .frame = 60, .expected = 0xa46b13979b5ddf92 }, // boot
-    .{ .frame = 300, .expected = 0xd558811ccad79b7b }, // intro cutscene
-    .{ .frame = 600, .expected = 0xd13de8a0c2506874 }, // title screen
-    .{ .frame = 900, .expected = 0xd4081df3ff6ad6db }, // save-data menu, past Start
+    .{ .frame = 60, .expected = 0xcccf1ad3eac1b559 }, // boot
+    .{ .frame = 300, .expected = 0xde51239925ba51eb }, // intro cutscene
+    .{ .frame = 600, .expected = 0x30a37e6b597b156d }, // title screen
+    .{ .frame = 900, .expected = 0xad0f63028af8ca82 }, // save-data menu, past Start
 };
 
 /// The scripted input log DESIGN.md §6.3 asks for, inline rather than in a
@@ -102,7 +102,7 @@ test "Cave Story MD boots headless and renders the same frames every run" {
 /// tone channel 2, with a decaying attenuation envelope — and on through the
 /// menu jingle Start makes.
 const audio_frames = 900;
-const audio_expected: u64 = 0x2154bd2b6d7f801b;
+const audio_expected: u64 = 0xb0f47eaf9aacf8ff;
 
 test "the resampled sound output is the same bytes every run" {
     var c = Cpu{};
@@ -148,19 +148,19 @@ test "the resampled sound output is the same bytes every run" {
 /// the framebuffer pins the *results*, not just the rendering: any change to
 /// FIFO, DMA, or port behaviour moves this hash.
 ///
-/// The pinned value is today's failing score (4 of 29, tabulated in DESIGN.md
-/// §9 under M4) and is meant to move as M4 lands. A mismatch is not a
-/// failure to debug from the hash — run
+/// The pinned value is page 1 passing 9 of 9. A mismatch is not a failure to
+/// debug from the hash — run
 /// `zigesis roms/VDPFIFOTesting.bin out.png --shot 120 --hash`, look at the
 /// PNG, and re-pin.
 ///
-/// ponytail: page 1 only, which is tests 1-9. The later pages need Start
-/// presses and minutes of emulated time, and page 5 onward does not render at
-/// all yet; widen this once the FIFO exists and there is a score worth
-/// watching.
+/// ponytail: page 1 only, which is tests 1-9. Walking all 18 pages needs a
+/// Start press per page and ten minutes of emulated time — minutes of it in a
+/// debug build — so the full score (111 of 122, tabulated in DESIGN.md §9
+/// under M4) is re-measured by hand with a replay log rather than on every
+/// `zig build test`.
 const vdp_rom_path = "roms/VDPFIFOTesting.bin";
 const vdp_frames = 120; // the page is drawn and static by frame 60
-const vdp_expected: u64 = 0xcff0f2056acd5cca;
+const vdp_expected: u64 = 0xfbce893957e9b8a7;
 
 test "the VDP scores the same on VDPFIFOTesting page 1 every run" {
     var c = Cpu{};

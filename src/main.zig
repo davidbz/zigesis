@@ -4,6 +4,7 @@
 //!     zig build run -- rom.bin --shot 600 shot.png      # headless: N frames, then a PNG
 //!     zig build run -- rom.bin --trace-z80              # Z80 instruction trace to stderr
 //!     zig build run -- rom.bin --volume 50              # 0-100, default 100
+//!     zig build run -- rom.bin --pal                    # a 50 Hz PAL machine
 //!     zig build run -- rom.bin --record in.log          # save one button byte per frame
 //!     zig build run -- rom.bin --shot 900 --wav out.wav    # headless: dump the mixed audio
 //!     zig build run -- rom.bin --replay in.log --shot 600 --hash
@@ -33,9 +34,17 @@ const Core = genesis.Core;
 
 const scale = 3;
 
+/// The window is a TV: fixed, and whatever the VDP is putting out gets
+/// stretched to fill it. H32's 256 pixels and H40's 320 are the same width of
+/// glass, and so are 224 lines and 240.
+const window_w = vdp.max_width * scale;
+const window_h = 224 * scale;
+
 /// Only used when there's no audio device to pace against; NTSC's 262 lines of
 /// 3420 mclk are really 59.92 Hz, and raylib's timer can't express the fraction.
 const ntsc_fps = 60;
+/// PAL's 313 lines of the same 3420 are 49.7 Hz.
+const pal_fps = 50;
 
 /// One byte per frame at ~60 Hz, so this is a bit over three hours of input.
 const max_replay_bytes = 1 << 20;
@@ -162,6 +171,7 @@ pub fn main(init: std.process.Init) !void {
     var wav_path: ?[]const u8 = null;
     var ladder = false;
     var mute_list: ?[]const u8 = null;
+    var pal = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--shot")) {
             shot_frames = try std.fmt.parseInt(u32, args.next() orelse "60", 10);
@@ -175,6 +185,8 @@ pub fn main(init: std.process.Init) !void {
             replay_path = args.next() orelse return error.MissingReplayPath;
         } else if (std.mem.eql(u8, arg, "--wav")) {
             wav_path = args.next() orelse return error.MissingWavPath;
+        } else if (std.mem.eql(u8, arg, "--pal")) {
+            pal = true;
         } else if (std.mem.eql(u8, arg, "--hash")) {
             want_hash = true;
         } else if (std.mem.eql(u8, arg, "--ladder")) {
@@ -189,7 +201,7 @@ pub fn main(init: std.process.Init) !void {
     const rom_path = path orelse {
         std.debug.print("usage: zigesis <rom> [out.png] [--shot N] [--trace-z80] " ++
             "[--volume 0-100] [--record FILE] [--replay FILE] [--hash] [--wav FILE] " ++
-            "[--ladder] [--mute 1,2,6]\n", .{});
+            "[--ladder] [--mute 1,2,6] [--pal]\n", .{});
         return error.NoRomGiven;
     };
     const image = std.Io.Dir.cwd().readFileAlloc(io, rom_path, gpa, .limited(8 << 20)) catch |err| {
@@ -205,6 +217,7 @@ pub fn main(init: std.process.Init) !void {
     g.* = .{ .rom = image, .cpu = &c, .z80_trace = trace_z80 };
     g.audio.volume_pct = volume_pct;
     g.y.ladder = ladder;
+    g.v.pal = pal; // 50 Hz, 313 lines, and a PAL machine at $A10001
     // Channels are named 1-6 the way the register map and every tracker names
     // them; anything else in the list is a typo worth reporting.
     if (mute_list) |list| {
@@ -251,15 +264,24 @@ pub fn main(init: std.process.Init) !void {
             try writeWav(io, p, pcm.items);
             std.debug.print("wrote {d} frames of audio to {s}\n", .{ pcm.items.len, p });
         }
-        _ = rl.ExportImage(.{
+        // Cropped to the mode the machine ended the run in: the buffer is
+        // always allocated for the largest one.
+        const shot = rl.ImageFromImage(.{
             .data = &g.v.fb,
-            .width = vdp.width,
-            .height = vdp.height,
+            .width = vdp.max_width,
+            .height = vdp.max_height,
             .mipmaps = 1,
             .format = rl.PIXELFORMAT_UNCOMPRESSED_R8G8B8A8,
-        }, shot_path.ptr);
+        }, .{
+            .x = 0,
+            .y = 0,
+            .width = @floatFromInt(g.v.frameWidth()),
+            .height = @floatFromInt(g.v.frameHeight()),
+        });
+        defer rl.UnloadImage(shot);
+        _ = rl.ExportImage(shot, shot_path.ptr);
     } else {
-        rl.InitWindow(vdp.width * scale, vdp.height * scale, "zigesis — Genesis");
+        rl.InitWindow(window_w, window_h, "zigesis — Genesis");
         if (!rl.IsWindowReady()) {
             // Closing a window that never opened is a segfault, so leave first.
             std.debug.print("no window (no display?); try --shot N out.png instead\n", .{});
@@ -268,8 +290,8 @@ pub fn main(init: std.process.Init) !void {
         defer rl.CloseWindow();
         const tex = rl.LoadTextureFromImage(.{
             .data = &g.v.fb,
-            .width = vdp.width,
-            .height = vdp.height,
+            .width = vdp.max_width,
+            .height = vdp.max_height,
             .mipmaps = 1,
             .format = rl.PIXELFORMAT_UNCOMPRESSED_R8G8B8A8,
         });
@@ -284,7 +306,7 @@ pub fn main(init: std.process.Init) !void {
         const has_audio = rl.IsAudioDeviceReady();
         if (!has_audio) {
             std.debug.print("no audio device; pacing on the frame timer instead\n", .{});
-            rl.SetTargetFPS(ntsc_fps);
+            rl.SetTargetFPS(if (pal) pal_fps else ntsc_fps);
         }
         rl.SetAudioStreamBufferSizeDefault(audio_chunk_frames);
         const stream = rl.LoadAudioStream(audio.sample_rate, audio_sample_size, audio_channels);
@@ -299,8 +321,13 @@ pub fn main(init: std.process.Init) !void {
             rl.BeginDrawing();
             rl.DrawTexturePro(
                 tex,
-                .{ .x = 0, .y = 0, .width = vdp.width, .height = vdp.height },
-                .{ .x = 0, .y = 0, .width = vdp.width * scale, .height = vdp.height * scale },
+                .{
+                    .x = 0,
+                    .y = 0,
+                    .width = @floatFromInt(g.v.frameWidth()),
+                    .height = @floatFromInt(g.v.frameHeight()),
+                },
+                .{ .x = 0, .y = 0, .width = window_w, .height = window_h },
                 .{ .x = 0, .y = 0 },
                 0,
                 .{ .r = 255, .g = 255, .b = 255, .a = 255 },

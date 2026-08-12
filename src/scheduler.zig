@@ -7,7 +7,6 @@
 
 const std = @import("std");
 const m68k = @import("m68k");
-const vdp = @import("vdp");
 const genesis = @import("genesis");
 
 const Genesis = genesis.Genesis;
@@ -29,13 +28,17 @@ const vint_level: u3 = 6;
 const hint_level: u3 = 4;
 
 pub fn runFrame(g: *Genesis, c: *Cpu) void {
+    // Both are modes, not constants: 262 lines or PAL's 313, 224 of them
+    // active or V30's 240. A game that changes either mid-frame gets the
+    // change from the next line, as hardware does.
     g.line = 0;
-    while (g.line < lines_per_frame) : (g.line += 1) {
+    while (g.line < g.v.linesPerFrame()) : (g.line += 1) {
+        const active = g.v.activeHeight();
         runZ80Line(g);
 
         // The H-int counter reloads throughout blanking and counts down
         // once per line over the active display.
-        if (g.line > vdp.height) {
+        if (g.line > active) {
             g.v.hint_counter = g.v.hintReload();
         } else if (g.v.hint_counter == 0) {
             g.v.hint_counter = g.v.hintReload();
@@ -51,15 +54,21 @@ pub fn runFrame(g: *Genesis, c: *Cpu) void {
         // Saturating: `runLine` also bails on `halted`, leaving cycles short.
         g.cpu_over = c.cycles -| end;
 
-        if (g.line < vdp.height) g.v.renderLine(g.line);
-        if (g.line == vdp.height) {
+        if (g.line < active) g.v.renderLine(g.line);
+        if (g.line == active) {
             g.v.in_vblank = true;
             g.v.vint_flag = true;
             g.v.vint_irq = true;
             g.z80_int_pending = true;
         }
-        if (g.line == lines_per_frame - 1) g.v.in_vblank = false;
+        if (g.line == g.v.linesPerFrame() - 1) g.v.in_vblank = false;
+
+        // Advanced last, so `g.mclk` is the master clock at the *start* of
+        // the line all through it: the VDP reads which line, how far into it,
+        // and when each queued write and DMA slot comes due out of this.
+        g.mclk += mclk_per_line;
     }
+    g.v.nextField();
     g.frame +%= 1;
 }
 
@@ -190,6 +199,16 @@ test "mclk_debt carries the sub-cycle remainder so a frame's clock does not drif
 
     runFrame(&g, &c);
     try testing.expectEqual(@as(u64, (2 * mclk_per_frame) % mclk_per_cpu), g.mclk_debt);
+}
+
+test "a PAL frame is more lines of the same clock, not longer lines" {
+    var c = Cpu{};
+    var g = spinGenesis(&c);
+    g.v.pal = true;
+
+    runFrame(&g, &c);
+    try testing.expectEqual(@as(u32, 313), g.line);
+    try testing.expectEqual(@as(u64, 313 * mclk_per_line), g.mclk);
 }
 
 test "a frame executes a frame's worth of 68000 cycles, not one instruction more per line" {

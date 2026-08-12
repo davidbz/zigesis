@@ -48,8 +48,8 @@ Deliberately stubbed in the PoC, i.e. the actual work of this project:
 - SN76489 PSG (done in M2).
 - Audio output of any kind (done in M2).
 - VDP rendering: shadow/highlight, interlace, H32 mode (256px), per-line
-  sprite/pixel limits, sprite masking, PAL (V30/240-line) timing.
-- VDP port and DMA timing: there is no FIFO, so the status register's
+  sprite/pixel limits, sprite masking, PAL (V30/240-line) timing (done in M4).
+- VDP port and DMA timing (done in M4): there is no FIFO, so the status register's
   empty/full/DMA-busy bits are constants; DMA of every mode completes
   instantly with no bus locking and no slot stealing; fill reaches VRAM only;
   reads from most code values return 0; there is no HV counter latch and no
@@ -530,58 +530,135 @@ a VDP whose ports lie about their state means pinning screenshot hashes to
 behaviour that is still wrong underneath, and re-pinning all of them once the
 FIFO lands.
 
-#### VDPFIFOTesting baseline (measured 2026-08-10, end of M2)
+#### VDPFIFOTesting score (measured 2026-08-11, conformance half done)
 
 Nemesis' VDP conformance ROM, fetched by `tools/fetch_test_roms.sh`, is the
 scoreboard for this milestone. It self-reports, so one `--shot` PNG is the
 whole verdict:
 
 ```
-zigesis roms/VDPFIFOTesting.bin out.png --shot 900   # page 1
+zigesis roms/VDPFIFOTesting.bin out.png --shot 120   # page 1
 ```
 
-Start pages forward; the ROM needs roughly 900 frames per page to finish
-running its tests, so a `--replay` log that taps Start every 900 frames walks
-the whole suite. Where it stands today, cumulative pass/fail as the ROM
-reports it:
+Start pages forward, and the ROM waits on it: a page's tests take between 900
+and 1800 frames, and a press that arrives while they are still running is
+missed. A `--replay` log that holds Start for 20 frames every 1800 walks all
+18 pages in about 39,000 frames (a minute in a release build); the press after
+the last page wraps back to page 1 and resets the counters, which is how you
+know you have reached the end.
 
-| Page | Tests | Result |
-|------|-------|--------|
-| 1 | 1-9   | 0 / 9   |
-| 2 | 10-16 | 0 / 16  |
-| 3 | 17-19 | 1 / 19  |
-| 4 | 20-29 | 4 / 29  |
-| 5+ | 30-45 | unreadable — see below |
+**111 of 122, up from 4 of 29 at the end of M2**, where pages 5 onward did not
+render at all. Cumulative pass/fail as the ROM reports it:
 
-From page 5 on the ROM's own UI stops rendering: the screen goes black, then
-to a solid backdrop colour, and never repaints. The 68000 is still alive in
-the ROM's main loop (`halted=false`, `pc` in `$0010f4`-`$001168` on every
-sample), so this is the VDP losing CRAM/VRAM state under those tests rather
-than the machine dying. Whatever fixes the causes below should be re-measured
-before anyone reads more into it.
+| Page | Tests | Result | Was |
+|------|--------|----------|--------|
+| 1 | 1-9 | 9 / 9 | 0 / 9 |
+| 2 | 10-16 | 15 / 16 | 0 / 16 |
+| 3 | 17-19 | 18 / 19 | 1 / 19 |
+| 4 | 20-29 | 28 / 29 | 4 / 29 |
+| 5 | 30-34 | 30 / 34 | unreadable |
+| 6 | 35-41 | 30 / 41 | unreadable |
+| 7-18 | 42-122 | 111 / 122 | unreadable |
 
-The failures are not 25 separate bugs. They are five gaps, all of them known
-and deliberate at M2:
+Pages 7 to 18 are the DMA transfer, fill, and copy matrices over every target,
+CD4 value, and auto-increment: all 81 pass. The eleven failures are three
+clusters, and each is a modelling ceiling rather than a loose end:
 
-- **There is no FIFO.** `readStatus` returns a constant (`vdp.zig:107`) with
-  FIFO-empty set, FIFO-full clear, and DMA-busy clear, always. Every test that
-  polls those flags — FIFO buffer size, separate read/write buffer, the seven
-  DMA busy flag tests, FIFO-full-before-transfer, FIFO wait states — is reading
-  a fixed lie.
-- **DMA is instantaneous** (the `ponytail:` marker at `vdp.zig:181`): no bus
-  locking, no slot stealing, no CPU hold-off. `dmaDone` zeroes the length
-  registers but never advances the source registers, so the source-register
-  update tests cannot pass either.
-- **DMA fill only reaches VRAM** (`vdp.zig:121`), which rules out fill to CRAM
-  and VSRAM and the data-port-writes-during-fill tests.
-- **`readData` returns 0 for any code outside 0/4/8** (`vdp.zig:132`), so
-  read-target switching and the 8-bit VRAM read target `01100` fail.
-- **No HV counter latch and no VSRAM data cache.** `genesis.hvCounter` is a
-  live counter with no TH-edge latch behind register 0 bit 1.
+- **16. FIFO wait states.** The FIFO is a timing model, not a queue: the write
+  lands in memory immediately and only its read-out slot is booked
+  (`vdp.zig`'s `fifoBook`, off the measured slot tables), which is what drives
+  the empty/full bits and the 68000's stall. The stall granularity is a whole
+  slot, so the sub-slot wait-state counts this test measures come out wrong.
+  Genesis Plus GX takes the same shortcut. Fixing it means draining the queue
+  on a schedule instead of writing through, which buys nothing any game can
+  see.
+- **31-33. Data-port writes during a DMA fill** (VRAM, CRAM, VSRAM). A fill
+  runs to completion inside the control-port write that triggers it, so a data
+  write "during" the fill is serviced after all of it rather than interleaved
+  with it. The busy flag and end time are still metered.
+- **35-41. The seven DMA busy flag tests.** The flag is a start/end pair
+  around work that has already happened, so it reports the right total
+  duration but not the hardware's edges — in particular when register 1's DMA
+  enable bit is toggled mid-operation, or when a DMA is triggered with it
+  clear. Driving these properly needs DMA stepped a slot at a time from the
+  scheduler rather than run atomically.
 
-Two things already work: DMA transfer bus locking passes, and enough of the
-DMA transfer wrapping and length-register behaviour passes to give page 4 its
-4 points.
+What the conformance half changed, all in `vdp.zig` unless noted: a four-entry
+FIFO with read-out slots off the measured H32/H40 tables, driving the status
+register's empty and full bits and stalling the 68000 through
+`genesis.stallUntil`; DMA metered off the access-slot budget, with the 68000
+held for the whole of a 68k-bus transfer and the source registers advanced;
+fill and copy to all three memories, taking their data where hardware does
+(VRAM from the last FIFO entry, CRAM and VSRAM from the oldest); the full read
+target matrix including the 8-bit VRAM read at code `01100`, with untouched
+bits coming back off the FIFO as open bus; the VSRAM data cache at 64 words;
+the H/V counter moved onto the master clock with the real ramp and its jump,
+plus the register 0 bit 1 latch; and the control port's partial-write, mode-4
+register lockout, bit-13 masking, and write-pending semantics.
+
+The scheduler now carries an absolute master clock (`genesis.mclk`, advanced
+3420 per line and never reset) because every one of those answers is a
+question about *when*, not just what.
+
+#### The rendering half (done 2026-08-12)
+
+The picture's size stopped being a constant. `vdp.fb` is allocated for the
+largest mode there is — 320 by 480, H40 and V30 with the double-resolution
+interlace — and `frameWidth`/`frameHeight` say how much of it the machine is
+using this frame. Everything downstream reads those: `main.zig` crops its
+`--shot` PNG to them and stretches the same rectangle over a fixed window,
+the way a TV does, and the scanline loop in `scheduler.zig` asks the VDP for
+its line count and active height per line rather than compiling them in.
+
+What landed:
+
+- **H32.** 256 pixels, 64 sprites in the table and 16 on a line, and the
+  narrower window and sprite tables that go with it — in H40 the VDP ignores
+  a bit of both base addresses, and H32 does not.
+- **Sprite limits and masking.** Sprites are dropped once a line has 20 of
+  them (16 in H32) or 320 pixels of them (256), which is the flicker every
+  crowded Genesis screen has, and status bit 6 says so. A sprite at X=0 masks
+  everything behind it on the line once another sprite has spent pixels
+  there. Sprite-on-sprite overlap sets the collision bit.
+- **Shadow/highlight.** A pixel neither plane claims priority on is drawn at
+  half brightness; palette 3's colours 14 and 15 stop being colours and
+  become operators that lift a pixel back to normal or push it down, and a
+  high-priority sprite pixel is always at full brightness. All three shades
+  are the same one-bit shift of each 3-bit channel the DAC does.
+- **Interlace.** Mode 1 changes nothing but the odd-field flag. Mode 2 weaves
+  the two fields into one buffer (a field's line 1 is the picture's line 2 or
+  3) and reads 8x16 patterns, which cost the pattern index its top bit.
+- **PAL and region.** `--pal` gives 313 lines, the status register's PAL bit,
+  the later V-counter wrap (and the later one again in V30), and a PAL
+  machine at `$A10001` — which is the one a game actually reads. Cave Story
+  MD switches itself to V30 when it sees it, which is the end-to-end proof
+  that all four of those agree.
+
+Verified by unit tests in `vdp.zig` (geometry, the two sprite limits and the
+X=0 mask, each shadow/highlight operator, the interlaced weave) and by
+re-running VDPFIFOTesting: still **111 of 122**, the same eleven failures, so
+none of this disturbed the ports.
+
+The acceptance suite above asks for pinned hashes across ten games, and §2
+forbids committing or fetching a commercial ROM: the two cannot both hold.
+What is pinned in `test/system_test.zig` is the two ROMs the fetch script can
+get — Cave Story MD at four checkpoints and VDPFIFOTesting page 1. The rest
+was checked by eye against locally-owned ROMs (Sonic 1, Alien Soldier,
+Aladdin, Mortal Kombat II, Eternal Champions, Streets of Rage 2) and is not
+in the suite, because a hash nobody else can reproduce is not a regression
+test.
+
+Ceilings worth naming, all in `vdp.zig`:
+
+- Sprite masking has one documented special case this does not model: an X=0
+  sprite masks even as the first on its line if the *previous* line hit a
+  sprite limit. It needs the parser's per-line state carried forward, and no
+  game is known to depend on it.
+- No fetchable ROM exercises H32 or interlace, so unit tests are the whole
+  check on both. The interlace weave in particular is written from Genesis
+  Plus GX's behaviour, not measured.
+- Sprites are fetched for the line being drawn, not the line ahead, so a
+  sprite table written mid-line takes effect a line early.
 
 ### M5: Frontend shell
 

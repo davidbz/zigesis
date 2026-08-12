@@ -66,6 +66,7 @@ zig build run -Doptimize=ReleaseFast -- path/to/rom.bin
 zig build run -- rom.bin shot.png --shot 600   # headless: run N frames, write a PNG
 zig build run -- rom.bin --trace-z80           # Z80 instruction trace to stderr
 zig build run -- rom.bin --volume 50           # 0-100, default 100
+zig build run -- rom.bin --pal                 # a 50 Hz PAL machine, 313 lines
 zig build run -- rom.bin --ladder              # the YM2612's analogue ladder effect
 zig build run -- rom.bin --mute 1,2,6          # silence FM channels (6 is the DAC)
 zig build run -- rom.bin --record in.log       # save one button byte per frame
@@ -91,7 +92,7 @@ after an intentional change is a copy-paste rather than a hand edit:
 
 ```
 zigesis rom.gen --replay in.log --shot 900 --hash
-frame 900 fb=d4081df3ff6ad6db audio=6751c2dcdadded6d samples=720927
+frame 900 fb=ad0f63028af8ca82 audio=b0f47eaf9aacf8ff samples=720927
 ```
 
 ## Testing
