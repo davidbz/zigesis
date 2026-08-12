@@ -532,19 +532,25 @@ FIFO lands.
 #### VDPFIFOTesting score (measured 2026-08-11, conformance half done)
 
 Nemesis' VDP conformance ROM, fetched by `tools/fetch_test_roms.sh`, is the
-scoreboard for this milestone. It self-reports, so one `--shot` PNG is the
-whole verdict:
+scoreboard for this milestone. It self-reports on screen, and `zig build
+vdpfifo` reads that report back out:
 
 ```
-zigesis roms/VDPFIFOTesting.bin out.png --shot 120   # page 1
+zig build vdpfifo -Doptimize=ReleaseFast
 ```
 
-Start pages forward, and the ROM waits on it: a page's tests take between 900
-and 1800 frames, and a press that arrives while they are still running is
-missed. A `--replay` log that holds Start for 20 frames every 1800 walks all
-18 pages in about 39,000 frames (a minute in a release build); the press after
-the last page wraps back to page 1 and resets the counters, which is how you
-know you have reached the end.
+The ROM draws its text one tile per character from a font uploaded in ASCII
+order, so a name table entry *is* the character code and the screen can be read
+as text without going near a pixel. `test/vdpfifo.zig` boots it headless and
+walks all 22 pages in about 10,000 frames (a quarter of a minute), pressing
+Start whenever the picture has held still for 400 frames — a page's tests take
+between 900 and 1800 frames, results are drawn as they come in, and a press
+that arrives while they run is missed, so "stopped changing" is the only
+reliable cue that a page has finished.
+
+Each page's failure count is pinned in that file and the step exits non-zero
+when one moves, in either direction: this is the regression gate on the ports,
+and re-pinning is a deliberate act rather than a re-blessed hash.
 
 **111 of 122, up from 4 of 29 at the end of M2**, where pages 5 onward did not
 render at all. Cumulative pass/fail as the ROM reports it:
@@ -557,9 +563,9 @@ render at all. Cumulative pass/fail as the ROM reports it:
 | 4 | 20-29 | 28 / 29 | 4 / 29 |
 | 5 | 30-34 | 30 / 34 | unreadable |
 | 6 | 35-41 | 30 / 41 | unreadable |
-| 7-18 | 42-122 | 111 / 122 | unreadable |
+| 7-22 | 42-122 | 111 / 122 | unreadable |
 
-Pages 7 to 18 are the DMA transfer, fill, and copy matrices over every target,
+Pages 7 to 22 are the DMA transfer, fill, and copy matrices over every target,
 CD4 value, and auto-increment: all 81 pass. The eleven failures are three
 clusters, and each is a modelling ceiling rather than a loose end:
 

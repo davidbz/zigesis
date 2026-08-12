@@ -183,6 +183,27 @@ pub fn build(b: *std.Build) void {
     b.step("z80-sst", "Run the Z80 SingleStepTests conformance suite (needs testdata/z80/)")
         .dependOn(&z80_sst_run.step);
 
+    // --- VDPFIFOTesting scoreboard --------------------------------------------
+    const vdpfifo = b.addExecutable(.{
+        .name = "vdpfifo",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/vdpfifo.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "genesis", .module = genesis },
+                .{ .name = "scheduler", .module = scheduler },
+                .{ .name = "vdp", .module = vdp },
+            },
+        }),
+    });
+    check_step.dependOn(&vdpfifo.step);
+    const vdpfifo_run = b.addRunArtifact(vdpfifo);
+    vdpfifo_run.setCwd(b.path(".")); // roms/ is resolved relative to the project
+    if (b.args) |args| vdpfifo_run.addArgs(args);
+    b.step("vdpfifo", "Walk VDPFIFOTesting and print its scoreboard (needs roms/)")
+        .dependOn(&vdpfifo_run.step);
+
     // --- the emulator ----------------------------------------------------------
     // raylib is a lazy dependency, but zigesis always needs it: the call below
     // still runs on every build after a fresh clone, a build script cannot
