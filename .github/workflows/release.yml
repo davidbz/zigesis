@@ -87,12 +87,15 @@ jobs:
       # unrunnable. Windows has no such bit; zip is what it expects anyway.
       - name: Package artifact
         shell: bash
+        env:
+          BIN: ${{ matrix.bin }}
+          ARTIFACT: ${{ matrix.artifact }}
         run: |
           mkdir -p dist
-          if [[ "${{ matrix.bin }}" == *.exe ]]; then
-            zip -9 -j "dist/${{ matrix.artifact }}.zip" "zig-out/bin/${{ matrix.bin }}"
+          if [[ "$BIN" == *.exe ]]; then
+            zip -9 -j "dist/$ARTIFACT.zip" "zig-out/bin/$BIN"
           else
-            tar -czf "dist/${{ matrix.artifact }}.tar.gz" -C zig-out/bin "${{ matrix.bin }}"
+            tar -czf "dist/$ARTIFACT.tar.gz" -C zig-out/bin "$BIN"
           fi
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
