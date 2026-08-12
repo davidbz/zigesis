@@ -81,6 +81,12 @@ also menu entries: each lists the eight slots and the quicksave, showing
 whether a slot holds anything and how long ago it was written (`empty`,
 `just now`, `12m ago`), so nothing is overwritten or loaded blind.
 
+With a game running, the menu's right half is the cartridge itself: the title,
+copyright and serial out of the ROM header, the region it claims and the
+timing it is being run at, the peripherals it wants, its size, its backup RAM,
+and whether the checksum in the header matches the bytes that follow it — a
+quick way to spot a bad dump.
+
 ### Files beside the ROM
 
 Save states and cartridge backup RAM live next to the ROM, with an extension
@@ -90,6 +96,11 @@ written on exit and every few seconds while it plays. A save state is only
 readable by the build that wrote it — a state from another build is refused,
 not loaded as garbage — so states do not survive recompiling zigesis; `.srm`
 files do.
+
+Box art is read from the same place, since no ROM carries one: leave
+`sonic.bin.png` or `sonic.png` beside the ROM (`.jpg` works too) and the menu
+draws it over the cartridge details. There is no database and nothing is
+downloaded.
 
 ### Options file
 

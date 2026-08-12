@@ -129,6 +129,12 @@ pub const Ui = struct {
     stamps: [slot_count]i64 = @splat(0),
     now: i64 = 0,
     stamps_dirty: bool = true,
+    /// What the root page says about the cartridge that is in, already laid
+    /// out as lines: `main.zig` writes it when a ROM goes in, because none of
+    /// it changes while the game plays. Empty means no cartridge.
+    info: [512:0]u8 = @splat(0),
+    /// Box art, if there is a picture beside the ROM. See `setArt`.
+    art: ?rl.Texture = null,
     browser: Browser = .{},
     path: [max_path:0]u8 = @splat(0),
     status_text: [96:0]u8 = @splat(0),
@@ -378,6 +384,28 @@ const Browser = struct {
     }
 };
 
+/// Box art is not in the ROM, so it is whatever picture is left beside it:
+/// `sonic.bin.png` or `sonic.png`, and the same two as `.jpg`. The texture
+/// is loaded here rather than in `main.zig` because it never leaves this
+/// file, and a raylib type crossing a module boundary is a second `@cImport`.
+pub fn setArt(ui: *Ui, rom_path: []const u8) void {
+    if (ui.art) |old| rl.UnloadTexture(old);
+    ui.art = null;
+    var buf: [max_path]u8 = undefined;
+    const stem = rom_path[0 .. rom_path.len - std.fs.path.extension(rom_path).len];
+    for ([_][]const u8{ rom_path, stem }) |base| {
+        for ([_][]const u8{ ".png", ".jpg" }) |ext| {
+            const p = std.fmt.bufPrintZ(&buf, "{s}{s}", .{ base, ext }) catch continue;
+            if (!rl.FileExists(p.ptr)) continue;
+            const tex = rl.LoadTexture(p.ptr);
+            if (tex.id != 0) {
+                ui.art = tex;
+                return;
+            }
+        }
+    }
+}
+
 fn isRom(path: [*:0]const u8) bool {
     for (rom_extensions) |ext| {
         if (rl.IsFileExtension(path, ext)) return true;
@@ -519,6 +547,28 @@ pub fn draw(ui: *const Ui, cfg: *const Config) void {
         };
         rl.DrawText(value, rl.GetScreenWidth() - fs - rl.MeasureText(value, fs), y, fs, color);
     }
+    // Last, so the selection bar runs under the card rather than over it.
+    if (ui.page == .root) drawCartridge(ui);
+}
+
+/// The right half of the root page: the box art, if there is a picture beside
+/// the ROM, and what the cartridge header says under it. The root page's rows
+/// are all labels with no values, so the whole column is free.
+fn drawCartridge(ui: *const Ui) void {
+    if (ui.info[0] == 0) return;
+    const fs = fontSize();
+    const x = half(rl.GetScreenWidth());
+    var y = topY();
+    if (ui.art) |art| {
+        // Fits the column and the top half of the screen, whichever runs out
+        // first: a scan can be portrait, square, or a whole unfolded box.
+        const room_w: f32 = @floatFromInt(rl.GetScreenWidth() - x - fs);
+        const room_h: f32 = @floatFromInt(half(rl.GetScreenHeight()) - y);
+        const scale = @min(room_w / @as(f32, @floatFromInt(art.width)), room_h / @as(f32, @floatFromInt(art.height)));
+        rl.DrawTextureEx(art, .{ .x = @floatFromInt(x), .y = @floatFromInt(y) }, 0, scale, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
+        y += @as(c_int, @intFromFloat(@as(f32, @floatFromInt(art.height)) * scale)) + rowHeight();
+    }
+    rl.DrawText(&ui.info, x, y, @max(10, @divTrunc(fs * 3, 4)), fg);
 }
 
 fn drawRow(y: c_int, selected: bool) void {

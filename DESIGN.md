@@ -225,7 +225,12 @@ One window, simple design, no toolbar clutter. States:
   submenu) / Load State (slot submenu) / Options (keys, video, audio,
   region) / Reset / Quit. Keyboard and mouse navigable. No custom widget
   library; raylib primitives are enough, and raygui is an acceptable single
-  dependency if plain primitives get tedious.
+  dependency if plain primitives get tedious. The root page's right half is
+  the cartridge card: what the header at $100 says about the game (title,
+  copyright, serial, region, devices, size, backup RAM, and whether the
+  checksum matches the ROM), over box art if a picture is left beside the
+  ROM — `sonic.bin.png` or `sonic.png`, `.jpg` too. No per-game database and
+  no downloads: art is a file you put there.
 
 Key configuration UI: pick an action, press a key, it rebinds; Escape
 cancels; conflicts are highlighted. Bindings live in the config file.
