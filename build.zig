@@ -175,7 +175,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "z80", .module = z80_fast }},
         }),
     });
-    b.installArtifact(z80_sst);
 
     const z80_sst_run = b.addRunArtifact(z80_sst);
     z80_sst_run.setCwd(b.path(".")); // testdata/ is resolved relative to the project
@@ -234,9 +233,10 @@ pub fn build(b: *std.Build) void {
         // once per member, and the build runner turns any unexpected linker
         // stderr into a failed step — even though the same libraries are
         // already on the link line as -lGL -lX11 ... and the link is fine.
-        // The self-hosted ELF linker skips them silently. Drop this once zig
-        // stops archiving .so paths.
-        zigesis.use_lld = false;
+        // The self-hosted ELF linker skips them silently, but only ELF: the
+        // COFF and MachO backends cannot link this yet, so those keep LLD.
+        // Drop this once zig stops archiving .so paths.
+        if (target.result.os.tag == .linux) zigesis.use_lld = false;
         b.installArtifact(zigesis);
         check_step.dependOn(&zigesis.step);
 
