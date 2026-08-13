@@ -393,6 +393,24 @@ releasing the Z80 doesn't burst-execute a backlog it never had. `--trace-z80`
 prints a `[frame line cycle]`-prefixed PC/opcode/register line per Z80
 instruction to stderr.
 
+Ceilings, and the first one is not the one it looks like. BUSREQ is granted
+instantly, so a driver's poll loop at `$A11100` exits on its first read — but
+the Z80 in this model is never caught mid-instruction, because it runs in
+line-sized batches and is therefore always between instructions when the
+68000 asks. Hardware's grant latency (to the end of the current bus cycle)
+disappears under a gap one step coarser: the two CPUs interleave at the
+scanline, 228 Z80 cycles at a time, not at the bus cycle. A 68000 that
+requests the bus, writes Z80 RAM and releases it inside one line has all of
+that land before the Z80's share of the line runs at all, so the Z80 sees
+finished writes rather than a window it was stopped for. Measuring the
+difference needs §3.3's split-the-line treatment, and M8's sweep found
+nothing that does.
+
+The other half of arbitration is missing rather than approximate: hardware
+can *refuse*. A Z80 read through the `$8000` bank window while a DMA holds
+the 68k bus is stalled on a console and goes straight through here, the same
+class of shortcut as M4's FIFO wait states.
+
 ### M2: PSG and the audio pipeline — done
 
 Deliverables: SN76489 core; mixing/resampling/ring-buffer pipeline;
