@@ -592,7 +592,7 @@ fn windowed(
     var record: ?std.ArrayList(u8) = if (args.record == null) null else .empty;
     defer if (record) |*r| r.deinit(gpa);
 
-    rl.InitWindow(windowW(cfg.scale), windowH(cfg.scale), "zigesis — Genesis");
+    rl.InitWindow(windowW(cfg.scale), windowH(cfg.scale), "zigesis");
     if (!rl.IsWindowReady()) {
         // Closing a window that never opened is a segfault, so leave first.
         std.debug.print("no window (no display?); try --shot N out.png instead\n", .{});
