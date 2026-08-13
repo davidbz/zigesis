@@ -40,6 +40,9 @@ pub const Action = enum {
     next_slot,
     quick_save,
     quick_load,
+    fast_forward,
+    frame_advance,
+    screenshot,
 
     pub const count = @typeInfo(Action).@"enum".fields.len;
     /// Buttons on one pad; actions past `pads * pad_count` are hotkeys.
@@ -80,6 +83,9 @@ pub const Action = enum {
             .next_slot => "Next State Slot",
             .quick_save => "Quicksave",
             .quick_load => "Quickload",
+            .fast_forward => "Fast Forward",
+            .frame_advance => "Frame Advance",
+            .screenshot => "Screenshot",
         };
     }
 };
@@ -110,6 +116,9 @@ pub const defaults: Bindings = blk: {
     b[@intFromEnum(Action.load_state)] = key_f4;
     b[@intFromEnum(Action.quick_save)] = key_f6;
     b[@intFromEnum(Action.quick_load)] = key_f7;
+    b[@intFromEnum(Action.fast_forward)] = key_tab;
+    b[@intFromEnum(Action.frame_advance)] = key_f8;
+    b[@intFromEnum(Action.screenshot)] = key_f12;
     break :blk b;
 };
 
@@ -119,13 +128,16 @@ const key_right = 262;
 const key_left = 263;
 const key_down = 264;
 const key_up = 265;
+const key_tab = 258;
 const key_f2 = 291;
 const key_f3 = 292;
 const key_f4 = 293;
 const key_f5 = 294;
 const key_f6 = 295;
 const key_f7 = 296;
+const key_f8 = 297;
 const key_f11 = 300;
+const key_f12 = 301;
 
 /// Pad `pad`'s byte for this frame. `down` is the host's keyboard, which is
 /// raylib's `IsKeyDown` and nothing else — passing it in is what keeps the
@@ -156,7 +168,7 @@ const named = [_]struct { []const u8, u32 }{
     .{ "SPACE", 32 },
     .{ "ESC", key_escape },
     .{ "ENTER", key_enter },
-    .{ "TAB", 258 },
+    .{ "TAB", key_tab },
     .{ "BACKSPACE", 259 },
     .{ "INSERT", 260 },
     .{ "DELETE", 261 },
@@ -175,11 +187,11 @@ const named = [_]struct { []const u8, u32 }{
     .{ "F5", key_f5 },
     .{ "F6", key_f6 },
     .{ "F7", key_f7 },
-    .{ "F8", 297 },
+    .{ "F8", key_f8 },
     .{ "F9", 298 },
     .{ "F10", 299 },
     .{ "F11", key_f11 },
-    .{ "F12", 301 },
+    .{ "F12", key_f12 },
     .{ "LSHIFT", 340 },
     .{ "LCTRL", 341 },
     .{ "LALT", 342 },

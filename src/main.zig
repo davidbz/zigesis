@@ -51,6 +51,9 @@ const ntsc_fps = 60;
 const pal_fps = 50;
 /// What the idle snow screen costs: one small texture upload per frame.
 const idle_fps = 60;
+/// Emulated frames per drawn one while the fast-forward key is held. The draw
+/// rate stays capped at the video rate, so this is the speed-up exactly.
+const fast_forward_frames = 4;
 
 /// How long a dirty backup RAM waits before it is written back to its file.
 /// A game touches its save many times in a row, and the file is 64 KiB.
@@ -209,7 +212,7 @@ fn readRom(io: std.Io, gpa: std.mem.Allocator, path: []const u8) ![]u8 {
 }
 
 /// Save states and backup RAM live beside the ROM, with an extension *added*
-/// rather than replaced: `sonic.bin.srm`, `sonic.bin.st0`. Two ROMs of the
+/// rather than replaced: `game.bin.srm`, `game.bin.st0`. Two ROMs of the
 /// same name in different formats then never share a file.
 fn keepPath(buf: []u8, path: []const u8) []const u8 {
     const n = @min(path.len, buf.len);
@@ -514,17 +517,21 @@ fn headless(
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args.record.?, .data = r.items });
         std.debug.print("recorded {d} frames of input to {s}\n", .{ r.items.len, args.record.? });
     }
-    // Cropped to the mode the machine ended the run in: the buffer is
-    // always allocated for the largest one.
-    const shot = rl.ImageFromImage(fbImage(g), .{
+    const shot = shotImage(g);
+    defer rl.UnloadImage(shot);
+    _ = rl.ExportImage(shot, shot_path.ptr);
+    report(c, frames);
+}
+
+/// The picture as a file wants it: cropped to the mode the machine is in,
+/// since the buffer is always allocated for the largest one.
+fn shotImage(g: *Genesis) rl.Image {
+    return rl.ImageFromImage(fbImage(g), .{
         .x = 0,
         .y = 0,
         .width = @floatFromInt(g.v.frameWidth()),
         .height = @floatFromInt(g.v.frameHeight()),
     });
-    defer rl.UnloadImage(shot);
-    _ = rl.ExportImage(shot, shot_path.ptr);
-    report(c, frames);
 }
 
 fn fbImage(g: *Genesis) rl.Image {
@@ -660,6 +667,18 @@ fn windowed(
                     ui.status("loaded {s}", .{shell.slotName(slot, &name)});
                 } else |err| ui.status("cannot load {s}: {t}", .{ shell.slotName(slot, &name), err });
             },
+            // Numbered by frame, so holding the key down never overwrites the
+            // shot before it and the order they were taken in is the order
+            // they sort in.
+            .screenshot => if (path) |p| {
+                var buf: [shell.max_path]u8 = undefined;
+                const shot_path = std.fmt.bufPrintZ(&buf, "{s}.{d}.png", .{ p, frames }) catch continue;
+                const shot = shotImage(g);
+                defer rl.UnloadImage(shot);
+                if (rl.ExportImage(shot, shot_path.ptr)) {
+                    ui.status("wrote {s}", .{shot_path});
+                } else ui.status("cannot write {s}", .{shot_path});
+            },
         }
         // The bar shows the quicksave's age too, so this is every frame now,
         // not just while the menu is up. Only the stat of the nine files
@@ -687,13 +706,23 @@ fn windowed(
             sram_next = rl.GetTime() + sram_write_seconds;
         }
 
-        const running = rom.* != null and !ui.open and !ui.paused;
+        const running = rom.* != null and !ui.open and (!ui.paused or ui.step);
         if (running) {
-            if (replay) |r| g.buttons = r.buttons(frames) else g.buttons = input.buttons(cfg.keys, 0, keyDown);
-            g.buttons2 = input.buttons(cfg.keys, 1, keyDown);
-            if (record) |*r| try r.append(gpa, g.buttons);
-            scheduler.runFrame(g, c);
-            frames += 1;
+            // A paused machine owes exactly one frame; a fast-forwarded one
+            // runs several per drawn frame. Either way the recording still
+            // gets one byte per emulated frame, so a replay of it is a replay.
+            const steps: u32 = if (ui.step) 1 else if (ui.fast) fast_forward_frames else 1;
+            for (0..steps) |_| {
+                if (replay) |r| g.buttons = r.buttons(frames) else g.buttons = input.buttons(cfg.keys, 0, keyDown);
+                g.buttons2 = input.buttons(cfg.keys, 1, keyDown);
+                if (record) |*r| try r.append(gpa, g.buttons);
+                scheduler.runFrame(g, c);
+                frames += 1;
+                // Drained inside the loop: the ring holds well under a
+                // fast-forwarded burst, so it has to go out as it is made.
+                if (has_audio) drainAudio(g, stream);
+            }
+            ui.step = false;
         } else {
             g.buttons = 0;
             g.buttons2 = 0;
@@ -702,7 +731,11 @@ fn windowed(
 
         // Idle and paused frames have no audio to pace against, so the timer
         // takes over; a running game hands pacing back to the ring buffer.
-        const want_fps: c_int = if (!running) idle_fps else if (has_audio) 0 else if (g.v.pal) pal_fps else ntsc_fps;
+        // Fast-forward paces on the timer too: capping the *drawn* frames at
+        // the video rate is what makes it a fixed multiple of full speed
+        // rather than as fast as the box happens to be.
+        const video_fps: c_int = if (g.v.pal) pal_fps else ntsc_fps;
+        const want_fps: c_int = if (!running) idle_fps else if (has_audio and !ui.fast) 0 else video_fps;
         if (want_fps != target_fps) {
             rl.SetTargetFPS(want_fps);
             target_fps = want_fps;
@@ -721,8 +754,9 @@ fn windowed(
         shell.draw(&ui, cfg);
         rl.EndDrawing();
 
-        if (!running or !has_audio) continue; // nothing is reading the mixer
-        drainAudio(g, stream);
+        // Nothing is reading the mixer when idle, and fast-forward is the one
+        // case where outrunning the device is the point.
+        if (!running or !has_audio or ui.fast) continue;
         paceToAudio(g, io);
     }
 

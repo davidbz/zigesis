@@ -814,7 +814,7 @@ offset in both structs, computed at comptime, so a state from a build with a
 different field order is refused instead of loaded as garbage. `version` is
 the same refusal for changes a layout hash cannot see — a field that keeps
 its shape and changes its meaning. Slots are nine files beside the ROM
-(`sonic.bin.st0` through `.st8`), extension *added* rather than replaced so
+(`game.bin.st0` through `.st8`), extension *added* rather than replaced so
 two dumps of the same game in different formats never share one.
 
 **The cartridge slot** is `Cart`, a 64 KiB backup RAM plus the two things
@@ -901,7 +901,7 @@ Ceilings:
   than packed. EEPROM and the serial saves some carts use are not backup RAM
   at all and are not handled.
 - The mapper is the standard `$A130F3` one only. SSF2's own mapper, the
-  Sonic & Knuckles lock-on, and the protection chips on unlicensed carts each
+  lock-on pass-through cart, and the protection chips on unlicensed carts each
   want their own arm.
 - A state is refused across builds by design, so no state survives a
   recompile of this emulator. Migrating them would mean a field-by-field
@@ -909,7 +909,7 @@ Ceilings:
 - The headless harness deliberately never touches `.srm` files: a regression
   run that could pick up someone's save is not deterministic.
 
-### M7: Debug tooling
+### M7: Debug tooling — deferred
 
 Deliverables: runtime-toggled 68k/Z80 trace with disassembly; VDP
 inspectors (planes, sprites, palette, registers); frame advance and
@@ -917,7 +917,15 @@ fast-forward; input recording/replay files; audio channel scope.
 Acceptance: each tool demonstrated in a short doc with screenshots; replay
 files reproduce runs bit-identically across machines.
 
-### M8: Compatibility and polish
+Deliberately skipped and taken out of order: M8 is what says whether the
+emulator is any good, and the debugger is worth most once there is a list of
+things to point it at. Three of the deliverables already exist elsewhere —
+record/replay landed in M0 and is the backbone of every regression run,
+`--trace-z80` and `--mute` are in `main.zig`, and frame advance and
+fast-forward shipped as part of M8's nice-to-haves. What is left is the
+disassembling trace, the VDP inspectors, and the audio scope.
+
+### M8: Compatibility and polish — done 2026-08-13
 
 Deliverables: run a 25-30 game compatibility list spanning common engines
 and known stress cases; fix what is broken or file precise issues (game,
@@ -925,6 +933,81 @@ frame, subsystem, suspected cause); nice-to-have features from section 5.1
 as time allows; README with screenshots and a feature table.
 Acceptance: at least 90 percent of the list is playable start to finish;
 every remaining issue has a reproduction via the replay harness.
+
+**The list is not in this document, and cannot be.** §10 forbids committing
+or fetching a ROM that cannot be redistributed, and naming twenty-five
+commercial cartridges in a design document is the same problem one step
+removed. So the list is a directory: `test/compat.zig` (`zig build compat`)
+discovers whatever images are in `roms/` when it runs, boots each one
+headless, and prints a line per ROM. The set this milestone was measured on
+is twenty-five images — twenty-two cartridges spanning the common engines
+(platformers, fighters, beat-em-ups, a 3D-ish vector title, several PAL
+releases, sizes from 512 KiB to 4 MiB, raw and `.smd` dumps) plus the free
+homebrew and test ROMs the fetch script already pulls in.
+
+**What the sweep looks at** is four things, worst first: did the 68000 halt,
+is every pixel of the mode's rectangle the same colour, how many frames has
+the picture been identical, and was either sound chip ever heard. Those catch
+every way a game fails to boot. It taps Start and C on a fixed schedule so a
+title screen and a character select do not stop the run, and hashes the
+framebuffer per frame for the still counter. Nothing is pinned and nothing
+fails: this is triage, and the gates stay `zig build test` and
+`zig build vdpfifo`. A verdict is a place to point `--shot` at, not a result
+— every non-`ok` line in the final sweep turned out to be a game sitting on a
+menu, a paused fight, or a fade between rounds, confirmed by screenshotting
+the frames either side of it.
+
+**One real bug, and it was the machine lying about itself.** A Japan-only
+cartridge stopped on its own region-lockout screen. The cause was not the
+cartridge or the VDP: `$A10001`'s version register was hard-coded to report
+an export machine, so a game whose own check asks "am I plugged into a
+domestic console?" got the wrong answer from a console that was, in every
+other respect, running its code correctly. The fix is `romRegions`, one
+parser for both header encodings (the `JUE` letters and the hex bitmask, bit
+0 Japan, bit 2 overseas NTSC, bit 3 overseas PAL), with `romIsPal` and the
+new `romIsDomestic` reading off it — the old `romIsPal` had its own copy of
+that parsing, so this deletes as much as it adds. `Genesis.domestic` is set
+in `init` from the cartridge and is deliberately *not* an option: unlike the
+video standard, which is a property of the television and belongs in the
+options, the region byte is a property of the console the cartridge is
+plugged into. Fixing it in `ioRead` rather than in the frontend means the
+sweep, the tests, and the window all get the same machine.
+
+**Nice-to-haves from §5.1**, all three cheap because the plumbing was already
+there: fast-forward (Tab, held) runs four emulated frames per drawn one with
+the drawn rate pinned to the video rate, so the speed-up is exactly 4x rather
+than however fast the box is; frame advance (F8) pauses and runs exactly one
+frame, repeating while held; screenshot (F12) writes the cropped picture
+beside the ROM numbered by frame. Each is one `input.Action` with a default
+binding, one branch in `shell.hotkeys`, and a few lines in the frame loop.
+Fast-forward skips `paceToAudio` and drains the mixer inside the run loop
+instead of after it — the ring is fixed-size and drops frames rather than
+overflowing, so a burst has to go out to the device as it is made.
+
+Tested: `romIsDomestic`/`romIsPal` across both header encodings and a
+too-short image, and `$A10001` reading `$20` for a domestic machine against
+`$A0` for an export one. 128 tests green, VDPFIFOTesting still 111 of 122,
+and no pinned hash moved — the region fix is invisible to a game that does
+not ask.
+
+Ceilings:
+
+- The sweep's verdicts are coarse by design. "Still" cannot tell a hang from
+  a title screen and "silent" cannot tell a broken sound chip from a quiet
+  scene; both are prompts to take a screenshot, and there is no substitute
+  for eyes on the picture.
+- The README's screenshots are not checked in, against the deliverable as
+  written. Every picture this emulator can draw is somebody else's artwork,
+  and a repository that refuses to carry a ROM should not carry frames of one
+  either; the README says which command makes them instead.
+- No 6-button pad. It needs a second button byte per pad, which ripples
+  through `Action.padMask`, `input.buttons`, the status bar, the config file
+  and the save-state layout hash — and every game in the set plays on three.
+- No gamepad support at all: the frontend reads a keyboard and nothing else.
+- Nothing in the sweep is a regression gate, so a game that quietly gets
+  worse will not turn a build red. Making it one means pinning hashes for
+  ROMs that cannot be committed, which §10 rules out; the free homebrew in
+  `test/system_test.zig` remains the pinned system-level check.
 
 ## 10. Testing Strategy Summary
 

@@ -188,7 +188,7 @@ fn field(rom: []const u8, at: usize, len: usize) []const u8 {
     return std.mem.trim(u8, rom[at..][0..len], " \x00");
 }
 
-/// Titles are laid out to fill their field — "SONIC THE     HEDGEHOG" — so
+/// Titles are laid out to fill their field — "SUPER TEST     GAME" — so
 /// the runs of spaces inside one get squeezed back down to a single space
 /// before anything tries to fit it in a column.
 pub fn squeezed(buf: []u8, text: []const u8) []const u8 {
@@ -314,13 +314,13 @@ test "a word access to SRAM carries both of its bytes" {
 
 test "the header names the game, and its checksum can be checked against the ROM" {
     var buf: [0x400]u8 = @splat(0);
-    @memcpy(buf[overseas_at..][0.."SONIC".len], "SONIC");
+    @memcpy(buf[overseas_at..][0.."TESTGAME".len], "TESTGAME");
     @memcpy(buf[serial_at..][0..serial_len], "GM 00001051-00");
     @memcpy(buf[region_at..][0..region_len], "JUE");
     @memcpy(buf[devices_at..][0..2], "J6");
 
     var i = info(&buf);
-    try testing.expectEqualStrings("SONIC", i.title);
+    try testing.expectEqualStrings("TESTGAME", i.title);
     try testing.expectEqualStrings("GM 00001051-00", i.serial);
     try testing.expectEqualStrings("JUE", i.region);
     try testing.expectEqualStrings("J6", i.devices);
@@ -337,13 +337,13 @@ test "the header names the game, and its checksum can be checked against the ROM
 
     // A Japan-only cart fills in only the domestic title.
     @memset(buf[overseas_at..][0..title_len], ' ');
-    @memcpy(buf[domestic_at..][0.."SNC1".len], "SNC1");
-    try testing.expectEqualStrings("SNC1", info(&buf).title);
+    @memcpy(buf[domestic_at..][0.."TST1".len], "TST1");
+    try testing.expectEqualStrings("TST1", info(&buf).title);
     // Too short to hold a header: nothing to say, rather than a crash.
     try testing.expectEqualStrings("", info(buf[0..0x100]).title);
 
     var squeeze: [32]u8 = undefined;
-    try testing.expectEqualStrings("SONIC THE HEDGEHOG", squeezed(&squeeze, "SONIC THE     HEDGEHOG"));
+    try testing.expectEqualStrings("SUPER TEST GAME", squeezed(&squeeze, "SUPER TEST     GAME"));
     // A title longer than the column it goes in is cut, not written past.
     try testing.expectEqualStrings("A B C D", squeezed(squeeze[0..7], "A  B  C  D  E"));
 }
