@@ -272,3 +272,37 @@ test "runFrame raises VBlank once per frame and leaves it pending until the CPU 
     // ...and the blanking window itself has closed again by the frame's end.
     try testing.expect(!g.v.in_vblank);
 }
+
+// Lowers the interrupt mask, enables VINT (reg 1 = display on, vint on, mode
+// 5), then spins; the level-6 autovector at $78 points at a handler that
+// spins too, so the CPU stays in it once it arrives.
+const vint_rom = build: {
+    var r = std.mem.zeroes([0x82]u8);
+    r[0..8].* = .{ 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x08 };
+    r[8..0x16].* = .{
+        0x46, 0xFC, 0x20, 0x00, // move #$2000,sr
+        0x33, 0xFC, 0x81, 0x64, 0x00, 0xC0, 0x00, 0x04, // move.w #$8164,($C00004).l
+        0x60, 0xFE, // bra.b *
+    };
+    r[0x78..0x7C].* = .{ 0x00, 0x00, 0x00, 0x80 };
+    r[0x80..0x82].* = .{ 0x60, 0xFE };
+    break :build r;
+};
+
+// The acknowledge is inferred, not driven (see `runLine`): this is the check
+// that the inference still recognises a taken interrupt. If z68k's exception
+// path changes shape, the symptom is silent — VINT stays pending and the
+// handler is re-entered on every instruction for the rest of the frame — so
+// the assertion that matters is that the request is *gone*.
+test "a taken VBlank clears its pending request" {
+    var c = Cpu{};
+    var g = Genesis{ .rom = &vint_rom, .cpu = &c };
+    Core.reset(&c, &g);
+
+    runFrame(&g, &c);
+
+    try testing.expect(g.v.vintEnabled());
+    try testing.expectEqual(@as(u32, 0x80), c.pc);
+    try testing.expectEqual(@as(u3, vint_level), c.sr.ipl);
+    try testing.expect(!g.v.vint_irq);
+}
