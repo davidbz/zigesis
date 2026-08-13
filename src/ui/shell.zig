@@ -69,6 +69,8 @@ const Act = union(enum) {
     region,
     audio_on,
     volume,
+    /// Which pad is in a port, by port index.
+    pad: u8,
     bind: Action,
     /// A slot on whichever of the two slot pages is up.
     slot: u8,
@@ -116,6 +118,8 @@ const options_items = [_]Item{
     .{ .label = "Video", .act = .{ .goto = .video } },
     .{ .label = "Audio", .act = .{ .goto = .audio } },
     .{ .label = "Keys", .act = .{ .goto = .keys } },
+    .{ .label = "Pad 1", .act = .{ .pad = 0 } },
+    .{ .label = "Pad 2", .act = .{ .pad = 1 } },
     .{ .label = "Back", .act = .back },
 };
 
@@ -164,9 +168,12 @@ pub const Ui = struct {
     /// The slot the save/load hotkeys use. Not an option: it is where you
     /// are right now, not how you like the emulator set up.
     slot: u8 = 0,
-    /// The pad byte `main.zig` is handing the machine this frame, which is
+    /// The pad word `main.zig` is handing the machine this frame, which is
     /// what the bar lights up — the buttons the *game* sees, not the keys.
-    pad: u8 = 0,
+    pad: u16 = 0,
+    /// Whether port 1 has a six-button pad in it, which is the only thing the
+    /// bar needs to know about it: three more chips to light.
+    pad_six: bool = false,
     /// When each slot's file was written, in seconds since the epoch, or 0
     /// for a slot with nothing in it. Filled in by `main.zig` — the shell has
     /// no filesystem and does not know where the ROM lives — whenever
@@ -356,6 +363,7 @@ fn adjust(ui: *Ui, cfg: *Config, act: Act, delta: i32, has_rom: bool) Request {
         .scale => cfg.scale = step(cfg.scale, delta, config.min_scale, config.max_scale),
         .fullscreen => cfg.fullscreen = !cfg.fullscreen,
         .audio_on => cfg.audio = !cfg.audio,
+        .pad => |n| cfg.pads[n] = if (cfg.pads[n] == .six) .three else .six,
         .volume => cfg.volume = step(cfg.volume, delta * volume_step, 0, 100),
         .region => {
             const n: i32 = @typeInfo(config.Region).@"enum".fields.len;
@@ -552,6 +560,15 @@ const bar_top = rl.Color{ .r = 34, .g = 36, .b = 50, .a = 255 };
 const bar_bottom = rl.Color{ .r = 14, .g = 14, .b = 22, .a = 255 };
 const bar_rule = rl.Color{ .r = 78, .g = 82, .b = 110, .a = 255 };
 const chip = rl.Color{ .r = 48, .g = 50, .b = 66, .a = 255 };
+/// The control panel the pad is drawn as: the near-black a button is sunk
+/// into, the rim of a hole with no button in it, and the halo a held one
+/// throws onto the panel around it.
+const bezel = rl.Color{ .r = 8, .g = 8, .b = 14, .a = 255 };
+const socket_rim = rl.Color{ .r = 30, .g = 31, .b = 42, .a = 255 };
+const glow = rl.Color{ .r = 255, .g = 210, .b = 60, .a = 70 };
+/// A cabinet's marquee is lit from behind, so the title is warm rather than
+/// the flat white of the readouts beside it.
+const marquee_ink = rl.Color{ .r = 255, .g = 238, .b = 198, .a = 255 };
 
 /// Below this the default raylib font stops being legible at all, so a 1x
 /// window gets a menu that overflows rather than one that cannot be read.
@@ -726,6 +743,7 @@ fn valueText(act: Act, cfg: *const Config, ui: *const Ui, buf: []u8) ?[:0]const 
             .pal => "PAL",
         },
         .audio_on => if (cfg.audio) "on" else "off",
+        .pad => |n| if (cfg.pads[n] == .six) "6-button" else "3-button",
         .volume => std.fmt.bufPrintZ(buf, "{d}%", .{cfg.volume}) catch null,
         .bind => |action| blk: {
             if (ui.rebind == action) break :blk "press a key...";
@@ -782,13 +800,29 @@ pub fn barHeight() c_int {
     return rowHeight() + half(fontSize());
 }
 
-/// The pad's face buttons, left to right as they sit on the real thing.
-const face_buttons = [_]struct { action: Action, label: [:0]const u8 }{
-    .{ .action = .a, .label = "A" },
-    .{ .action = .b, .label = "B" },
-    .{ .action = .c, .label = "C" },
-    .{ .action = .start, .label = "START" },
+/// The pad's face buttons where they sit on the real six-button pad: X Y Z
+/// along the top, A B C under them. Row 0 is the half a three-button pad does
+/// not have, which is drawn as an empty socket rather than left out — see
+/// `drawPad`.
+const face_buttons = [_]struct { action: Action, col: c_int, row: c_int, label: [:0]const u8 }{
+    .{ .action = .x, .col = 0, .row = 0, .label = "X" },
+    .{ .action = .y, .col = 1, .row = 0, .label = "Y" },
+    .{ .action = .z, .col = 2, .row = 0, .label = "Z" },
+    .{ .action = .a, .col = 0, .row = 1, .label = "A" },
+    .{ .action = .b, .col = 1, .row = 1, .label = "B" },
+    .{ .action = .c, .col = 2, .row = 1, .label = "C" },
 };
+
+/// The two in the middle of the pad, stacked as they sit on it: MODE above,
+/// START below. MODE is row 0, so a three-button pad loses it the same way it
+/// loses X/Y/Z.
+const pad_pills = [_]struct { action: Action, row: c_int, label: [:0]const u8 }{
+    .{ .action = .mode, .row = 0, .label = "MODE" },
+    .{ .action = .start, .row = 1, .label = "START" },
+};
+
+/// The row a three-button pad does not have. Both tables put it first.
+const six_only_row = 0;
 
 /// The cross, as cells of a 3x3 grid. The middle one is the hub: no button
 /// under it, and it is what makes the other four read as a d-pad.
@@ -800,7 +834,7 @@ const dpad_cells = [_]struct { col: c_int, row: c_int, action: ?Action }{
     .{ .col = 1, .row = 2, .action = .down },
 };
 
-fn held(pad: u8, action: Action) bool {
+fn held(pad: u16, action: Action) bool {
     return pad & action.padMask() != 0;
 }
 
@@ -844,11 +878,16 @@ fn drawBar(ui: *const Ui, cfg: *const Config) void {
     const ty = y + half(h - fs);
 
     rl.DrawRectangleGradientV(0, y, w, h, bar_top, bar_bottom);
+    // A lit edge over a dark one: two lines are what make the strip read as a
+    // panel with a lip rather than as a gutter with a rule on it.
     rl.DrawRectangle(0, y, w, 1, bar_rule);
+    rl.DrawRectangle(0, y + 1, w, 1, bezel);
 
     // The pad is drawn first because where it ends is what the right-hand side
     // has to stay clear of: the hints there give way, the name does not.
-    const name_x = gap + drawPad(gap, y, h, ui.pad) + fs;
+    const seam_x = gap + drawPad(gap, y, h, ui.pad, ui.pad_six) + gap;
+    drawSeam(seam_x, y, h);
+    const name_x = seam_x + fs;
     const floor = name_x + fs * name_floor_chars;
 
     // Right to left, because everything on this side has a width of its own
@@ -874,7 +913,15 @@ fn drawBar(ui: *const Ui, cfg: *const Config) void {
     right = barHint(right, floor, ty, fs, .fast, fast_key, if (ui.fast) hilite else dim);
 
     const name: [:0]const u8 = if (ui.card_n == 0) "NO CARTRIDGE" else std.mem.sliceTo(&ui.card_title, 0);
-    drawName(name, name_x, right - name_x, ty, fs, if (ui.card_n == 0) dim else fg);
+    drawName(name, name_x, right - name_x, ty, fs, if (ui.card_n == 0) dim else marquee_ink);
+}
+
+/// The groove between the control panel and the marquee. A cabinet is built
+/// out of pieces, and the seam is what says which piece is which.
+fn drawSeam(x: c_int, y: c_int, h: c_int) void {
+    const m = panelMargin(h);
+    rl.DrawRectangle(x, y + m, 1, h - m * 2, bezel);
+    rl.DrawRectangle(x + 1, y + m, 1, h - m * 2, bar_rule);
 }
 
 /// Pixels a scrolling title moves per second, in font sizes: slow enough to
@@ -999,37 +1046,140 @@ fn v2(x: c_int, y: c_int) rl.Vector2 {
     return .{ .x = @floatFromInt(x), .y = @floatFromInt(y) };
 }
 
+/// How much of the bar's height the panel keeps clear of its own edges.
+fn panelMargin(h: c_int) c_int {
+    return @max(2, @divTrunc(h, 8));
+}
+
+/// raylib's built-in font is a ten-pixel bitmap drawn with no filtering, so a
+/// size that is not a whole multiple of it lands strokes on half pixels — which
+/// at panel size is what turns an X into an H. The letters on the pad are the
+/// smallest text in the window and the ones that have to be read at a glance,
+/// so they are snapped to that grid rather than fitted exactly.
+const font_grid = 10;
+
+fn gridFont(want: c_int) c_int {
+    return @max(font_grid, @divTrunc(want, font_grid) * font_grid);
+}
+/// A round button needs to be about this wide before a letter fits inside it.
+/// Below that the panel is lit dots and the layout says which is which — the
+/// same thing that says it on the pad itself.
+const button_label_floor = 13;
+
 /// The pad, lit by the byte the machine is being handed this frame — which
 /// makes it the fastest check there is that a binding does what it says, and
 /// during a replay it is the recorded input playing back. Returns its width.
-fn drawPad(x: c_int, y: c_int, h: c_int, pad: u8) c_int {
-    const u = @max(3, @divTrunc(h, 4));
-    const top = y + half(h - u * 3);
+///
+/// It is drawn as a cabinet's control panel: the cross, the six buttons in the
+/// two rows they sit in on the real thing, and MODE over START between them.
+/// A three-button port leaves the top row as empty sockets rather than dropping
+/// it, so the panel is the same width either way and nothing to the right of it
+/// moves when the option changes.
+fn drawPad(x: c_int, y: c_int, h: c_int, pad: u16, six: bool) c_int {
+    const m = panelMargin(h);
+    const inner = h - m * 2;
+    const top = y + m;
+    const row_gap = @max(1, @divTrunc(inner, 12));
+    const d = @divTrunc(inner - row_gap, 2); // one button, and half the panel tall
+
+    // The cross is one shape, not five tiles: an outlined plus in the panel's
+    // grey, with a whole arm lighting at a time. Its arms are drawn over the
+    // outline rather than inside it, which is what keeps it a single piece.
+    const u = @divTrunc(inner, 3);
+    const edge = @max(1, @divTrunc(u, 8));
+    drawCross(x - edge, top - edge, u, edge, bezel);
+    drawCross(x, top, u, 0, chip);
     for (dpad_cells) |c| {
-        const on = if (c.action) |a| held(pad, a) else false;
-        rl.DrawRectangle(x + c.col * u, top + c.row * u, u - 1, u - 1, if (on) hilite else chip);
+        const a = c.action orelse continue;
+        if (!held(pad, a)) continue;
+        rl.DrawRectangle(x + c.col * u, top + c.row * u, u, u, hilite);
     }
 
-    const fs = @max(8, u);
-    const ch = u * 2;
-    const cy = y + half(h - ch);
-    var bx = x + u * 4;
+    // The top row sits a third of a button to the left of the bottom one: the
+    // six are an arc on the real pad, not a grid.
+    const col_gap = @max(1, @divTrunc(d, 6));
+    const stagger = @divTrunc(d, 3);
+    // A panel this small has no room for a letter inside a button, and it drops
+    // every word at once rather than keeping the two that would still fit: what
+    // is left is a light display, and the layout is what says which light is
+    // which — the same thing that says it on the pad itself.
+    const labels = d >= button_label_floor;
+    const bfs: c_int = if (labels) gridFont(@divTrunc(d * 7, 10)) else 0;
+    const face_x = x + u * 3 + m + stagger;
     for (face_buttons) |b| {
-        const w = rl.MeasureText(b.label.ptr, fs) + fs;
-        drawChip(bx, cy, w, ch, b.label, fs, held(pad, b.action));
-        bx += w + half(u);
+        const cx = face_x + b.col * (d + col_gap) - if (b.row == six_only_row) stagger else 0;
+        const cy = top + b.row * (d + row_gap);
+        const socket = !six and b.row == six_only_row;
+        drawButton(cx + half(d), cy + half(d), d, b.label, bfs, held(pad, b.action), socket);
     }
-    return bx - half(u) - x;
+
+    const pfs: c_int = if (labels) gridFont(@divTrunc(d * 3, 5)) else 0;
+    const pill_x = face_x + 3 * (d + col_gap) + m;
+    var pill_w: c_int = d * 2; // wide enough to read as a pill with no word in it
+    if (labels) for (pad_pills) |p| {
+        pill_w = @max(pill_w, rl.MeasureText(p.label.ptr, pfs) + pfs);
+    };
+    for (pad_pills) |p| {
+        const socket = !six and p.row == six_only_row;
+        drawPill(pill_x, top + p.row * (d + row_gap), pill_w, d, p.label, pfs, held(pad, p.action), socket);
+    }
+    return pill_x + pill_w - x;
 }
 
-fn drawChip(x: c_int, y: c_int, w: c_int, h: c_int, label: [:0]const u8, fs: c_int, on: bool) void {
-    rl.DrawRectangleRounded(.{
+/// The five cells of the cross as one plus-shaped piece, `grow` pixels proud
+/// of the `u`-cell grid so the same call draws its outline.
+fn drawCross(x: c_int, y: c_int, u: c_int, grow: c_int, color: rl.Color) void {
+    const long = u * 3 + grow * 2;
+    const wide = u + grow * 2;
+    rl.DrawRectangle(x + u, y, wide, long, color);
+    rl.DrawRectangle(x, y + u, long, wide, color);
+}
+
+/// One round button: sunk into the panel, lit from inside when it is held, and
+/// throwing a halo onto the panel while it is. `socket` is a hole with no
+/// button in it, which is what a three-button port's top row is — it never
+/// lights, whatever the keyboard is doing, because the machine is not being
+/// handed that bit either.
+fn drawButton(cx: c_int, cy: c_int, d: c_int, label: [:0]const u8, fs: c_int, on: bool, socket: bool) void {
+    const r: f32 = @floatFromInt(half(d));
+    if (socket) {
+        rl.DrawCircle(cx, cy, r, socket_rim);
+        rl.DrawCircle(cx, cy, r - @as(f32, @floatFromInt(@max(1, @divTrunc(d, 10)))), bezel);
+        return;
+    }
+    if (on) rl.DrawCircle(cx, cy, r + @as(f32, @floatFromInt(@max(2, @divTrunc(d, 4)))), glow);
+    rl.DrawCircle(cx, cy, r, bezel);
+    rl.DrawCircle(cx, cy, r - @as(f32, @floatFromInt(@max(1, @divTrunc(d, 8)))), if (on) hilite else chip);
+    if (fs > 0) rl.DrawText(label.ptr, cx - half(rl.MeasureText(label.ptr, fs)), cy - half(fs), fs, if (on) ink else fg);
+}
+
+/// START and MODE, which are pills on the real pad and carry a word rather
+/// than a letter.
+fn drawPill(x: c_int, y: c_int, w: c_int, h: c_int, label: [:0]const u8, fs: c_int, on: bool, socket: bool) void {
+    const box = rl.Rectangle{
         .x = @floatFromInt(x),
         .y = @floatFromInt(y),
         .width = @floatFromInt(w),
         .height = @floatFromInt(h),
-    }, 0.45, 6, if (on) hilite else chip);
-    rl.DrawText(label.ptr, x + half(w - rl.MeasureText(label.ptr, fs)), y + half(h - fs), fs, if (on) ink else dim);
+    };
+    rl.DrawRectangleRounded(box, 0.5, 6, if (socket) socket_rim else bezel);
+    const inset = @max(1, @divTrunc(h, 8));
+    if (socket) {
+        rl.DrawRectangleRounded(.{
+            .x = box.x + @as(f32, @floatFromInt(inset)),
+            .y = box.y + @as(f32, @floatFromInt(inset)),
+            .width = box.width - @as(f32, @floatFromInt(inset * 2)),
+            .height = box.height - @as(f32, @floatFromInt(inset * 2)),
+        }, 0.5, 6, bezel);
+        return;
+    }
+    rl.DrawRectangleRounded(.{
+        .x = box.x + @as(f32, @floatFromInt(inset)),
+        .y = box.y + @as(f32, @floatFromInt(inset)),
+        .width = box.width - @as(f32, @floatFromInt(inset * 2)),
+        .height = box.height - @as(f32, @floatFromInt(inset * 2)),
+    }, 0.5, 6, if (on) hilite else chip);
+    if (fs > 0) rl.DrawText(label.ptr, x + half(w - rl.MeasureText(label.ptr, fs)), y + half(h - fs), fs, if (on) ink else fg);
 }
 
 /// The idle screen's caption. The snow itself is `snow.zig`, drawn by
@@ -1125,7 +1275,7 @@ test "the cartridge card holds what fits and cuts the rest" {
 }
 
 test "every pad button has a light on the bar, and only one" {
-    var mask: u8 = 0;
+    var mask: u16 = 0;
     var lights: usize = 0;
     for (dpad_cells) |c| {
         const action = c.action orelse continue;
@@ -1136,8 +1286,20 @@ test "every pad button has a light on the bar, and only one" {
         mask |= b.action.padMask();
         lights += 1;
     }
-    try std.testing.expectEqual(@as(u8, 0xFF), mask);
-    try std.testing.expectEqual(@as(usize, 8), lights); // no bit drawn twice
+    for (pad_pills) |p| {
+        mask |= p.action.padMask();
+        lights += 1;
+    }
+    try std.testing.expectEqual(@as(u16, 0xFFF), mask);
+    try std.testing.expectEqual(@as(usize, 12), lights); // no bit drawn twice
+
+    // A three-button port lights everything but the row it does not have, so
+    // what the panel shows is what the machine is being handed.
+    var three: u16 = 0;
+    for (face_buttons) |b| three |= if (b.row == six_only_row) 0 else b.action.padMask();
+    for (pad_pills) |p| three |= if (p.row == six_only_row) 0 else p.action.padMask();
+    for (dpad_cells) |c| three |= if (c.action) |a| a.padMask() else 0;
+    try std.testing.expectEqual(@as(u16, 0xFF), three);
 
     const cfg = Config{};
     var buf: [quick_hint_buf]u8 = undefined;

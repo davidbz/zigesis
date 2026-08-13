@@ -18,12 +18,19 @@ pub const max_scale = 4;
 /// which is what a user wants until it guesses wrong on some import.
 pub const Region = enum { auto, ntsc, pal };
 
+/// What is plugged into a controller port. Three buttons is the default
+/// because a six-button pad is not a superset: its sixth read hands a game
+/// every direction at once, and one that only knows the three-button pad reads
+/// that as the stick being pushed four ways.
+pub const PadType = enum { three, six };
+
 pub const Config = struct {
     scale: u8 = 3,
     fullscreen: bool = false,
     region: Region = .auto,
     audio: bool = true,
     volume: u8 = 100,
+    pads: [2]PadType = @splat(.three),
     keys: input.Bindings = input.defaults,
 
     pub fn parse(text: []const u8) Config {
@@ -49,6 +56,10 @@ pub const Config = struct {
                 cfg.audio = parseBool(val) orelse cfg.audio;
             } else if (std.mem.eql(u8, key, "volume")) {
                 cfg.volume = @min(100, parseInt(u8, val) orelse cfg.volume);
+            } else if (std.mem.eql(u8, key, "pad1")) {
+                cfg.pads[0] = std.meta.stringToEnum(PadType, val) orelse cfg.pads[0];
+            } else if (std.mem.eql(u8, key, "pad2")) {
+                cfg.pads[1] = std.meta.stringToEnum(PadType, val) orelse cfg.pads[1];
             } else if (std.mem.startsWith(u8, key, "key.")) {
                 const action = std.meta.stringToEnum(input.Action, key["key.".len..]) orelse continue;
                 cfg.keys[@intFromEnum(action)] = input.keyCode(val) orelse continue;
@@ -65,6 +76,7 @@ pub const Config = struct {
         try w.print("region = {s}\n", .{@tagName(cfg.region)});
         try w.print("audio = {}\n", .{cfg.audio});
         try w.print("volume = {d}\n", .{cfg.volume});
+        try w.print("pad1 = {s}\npad2 = {s}\n", .{ @tagName(cfg.pads[0]), @tagName(cfg.pads[1]) });
         var buf: [input.max_key_name]u8 = undefined;
         for (std.enums.values(input.Action)) |action| {
             const key = cfg.keys[@intFromEnum(action)];
@@ -84,7 +96,7 @@ fn parseBool(val: []const u8) ?bool {
 }
 
 test "a written config parses back identical" {
-    var cfg = Config{ .scale = 2, .fullscreen = true, .region = .pal, .audio = false, .volume = 42 };
+    var cfg = Config{ .scale = 2, .fullscreen = true, .region = .pal, .audio = false, .volume = 42, .pads = .{ .six, .three } };
     cfg.keys[@intFromEnum(input.Action.start)] = 'Q';
     cfg.keys[@intFromEnum(input.Action.menu)] = 348; // unnamed: goes out as a number
 

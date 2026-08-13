@@ -44,7 +44,7 @@ const checkpoints = [_]Checkpoint{
 const start_at = 620;
 const start_until = 641;
 
-fn buttonsAt(frame: u32) u8 {
+fn buttonsAt(frame: u32) u16 {
     return if (frame >= start_at and frame < start_until) genesis.btn_start else 0;
 }
 
@@ -52,7 +52,7 @@ fn buttonsAt(frame: u32) u8 {
 fn runTo(g: *Genesis, c: *Cpu, frame: *u32, until: u32) !void {
     while (frame.* < until) : (frame.* += 1) {
         try std.testing.expect(!c.halted);
-        g.buttons = buttonsAt(frame.*);
+        g.pads[0].buttons = buttonsAt(frame.*);
         scheduler.runFrame(g, c);
     }
 }
@@ -119,7 +119,7 @@ test "the resampled sound output is the same bytes every run" {
     var frame: u32 = 0;
     while (frame < audio_frames) : (frame += 1) {
         try std.testing.expect(!c.halted);
-        g.buttons = buttonsAt(frame);
+        g.pads[0].buttons = buttonsAt(frame);
         scheduler.runFrame(g, &c);
         // Drained every frame so the fixed-size ring never drops a sample,
         // exactly as `main.zig`'s loop drains it.
@@ -192,7 +192,7 @@ fn runAndHash(g: *Genesis, c: *Cpu, frame: *u32) !u64 {
     const until = frame.* + state_frames;
     while (frame.* < until) : (frame.* += 1) {
         try std.testing.expect(!c.halted);
-        g.buttons = buttonsAt(frame.*);
+        g.pads[0].buttons = buttonsAt(frame.*);
         scheduler.runFrame(g, c);
         while (g.audio.pop()) |s| hasher.update(std.mem.asBytes(&s));
         hasher.update(std.mem.sliceAsBytes(&g.v.fb));

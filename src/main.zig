@@ -59,7 +59,8 @@ const fast_forward_frames = 4;
 /// A game touches its save many times in a row, and the file is 64 KiB.
 const sram_write_seconds = 5;
 
-/// One byte per frame at ~60 Hz, so this is a bit over three hours of input.
+/// Two bytes per frame at ~60 Hz, so this is a bit over an hour and a half of
+/// input.
 const max_replay_bytes = 1 << 20;
 const max_rom_bytes = 8 << 20;
 const max_config_bytes = 64 << 10;
@@ -76,16 +77,25 @@ const audio_chunk_frames = 2048;
 /// sleep, deficit means run flat out.
 const audio_target_frames = 2 * audio_chunk_frames;
 
-/// A recorded input log: one byte of `Genesis.buttons` per frame, no header.
-/// Past the end replays as no buttons held, so a log shorter than the run
-/// still reproduces up to where it stops.
+/// A recorded input log: pad 1's button word, little-endian, one per frame,
+/// no header. Past the end replays as no buttons held, so a log shorter than
+/// the run still reproduces up to where it stops.
+///
+/// Two bytes since the six-button pad: a log of a six-button run has to replay
+/// as one. There is no header to refuse a one-byte log from an older build
+/// with, so those replay as noise rather than as a message.
 const Replay = struct {
     log: []const u8,
 
-    fn buttons(r: Replay, frame: u32) u8 {
-        return if (frame < r.log.len) r.log[frame] else 0;
+    fn buttons(r: Replay, frame: u32) u16 {
+        const at = frame * 2;
+        return if (at + 1 < r.log.len) std.mem.readInt(u16, r.log[at..][0..2], .little) else 0;
     }
 };
+
+fn recordButtons(r: *std.ArrayList(u8), gpa: std.mem.Allocator, b: u16) !void {
+    try r.appendSlice(gpa, &std.mem.toBytes(std.mem.nativeToLittle(u16, b)));
+}
 
 /// The command-line switches that are not options: debugging knobs and the
 /// headless plumbing, none of which belong in the config file.
@@ -195,6 +205,7 @@ fn startMachine(g: *Genesis, c: *Cpu, rom: []const u8, cfg: Config, opts: Opts) 
     g.z80_trace = opts.trace_z80;
     g.y.ladder = opts.ladder;
     g.y.mute = opts.mute;
+    applyPads(g, cfg);
     g.v.pal = switch (cfg.region) {
         .auto => genesis.romIsPal(rom),
         .ntsc => false,
@@ -366,6 +377,7 @@ pub fn main(init: std.process.Init) !void {
     // read and never written back: a flag is for this run.
     var volume_arg: ?u8 = null;
     var pal_arg = false;
+    var pad6_arg = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--shot")) {
             shot_frames = try std.fmt.parseInt(u32, args.next() orelse "60", 10);
@@ -381,6 +393,8 @@ pub fn main(init: std.process.Init) !void {
             wav_path = args.next() orelse return error.MissingWavPath;
         } else if (std.mem.eql(u8, arg, "--pal")) {
             pal_arg = true;
+        } else if (std.mem.eql(u8, arg, "--pad6")) {
+            pad6_arg = true;
         } else if (std.mem.eql(u8, arg, "--hash")) {
             want_hash = true;
         } else if (std.mem.eql(u8, arg, "--ladder")) {
@@ -422,6 +436,7 @@ pub fn main(init: std.process.Init) !void {
         var cfg = Config{};
         if (volume_arg) |v| cfg.volume = v;
         if (pal_arg) cfg.region = .pal;
+        if (pad6_arg) cfg.pads = @splat(.six);
         const image = rom orelse {
             std.debug.print("--shot needs a ROM\n", .{});
             return error.NoRomGiven;
@@ -450,6 +465,7 @@ pub fn main(init: std.process.Init) !void {
     };
     if (volume_arg) |v| cfg.volume = v;
     if (pal_arg) cfg.region = .pal;
+    if (pad6_arg) cfg.pads = @splat(.six);
     if (rom) |image| startMachine(g, &c, image, cfg, opts);
 
     try windowed(io, gpa, g, &c, &cfg, opts, &rom, .{
@@ -495,8 +511,8 @@ fn headless(
 
     var frames: u32 = 0;
     while (frames < n and !c.halted) : (frames += 1) {
-        if (replay) |r| g.buttons = r.buttons(frames);
-        if (record) |*r| try r.append(gpa, g.buttons);
+        if (replay) |r| g.pads[0].buttons = r.buttons(frames);
+        if (record) |*r| try recordButtons(r, gpa, g.pads[0].buttons);
         scheduler.runFrame(g, c);
         // Drained every frame so the fixed-size ring never drops a sample,
         // exactly as the windowed loop and the regression suite drain it.
@@ -515,7 +531,7 @@ fn headless(
     }
     if (record) |*r| {
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args.record.?, .data = r.items });
-        std.debug.print("recorded {d} frames of input to {s}\n", .{ r.items.len, args.record.? });
+        std.debug.print("recorded {d} frames of input to {s}\n", .{ r.items.len / 2, args.record.? });
     }
     const shot = shotImage(g);
     defer rl.UnloadImage(shot);
@@ -701,6 +717,7 @@ fn windowed(
         }
         // The mixer is where the volume knob lives, so muted is volume 0.
         g.audio.volume_pct = if (cfg.audio) cfg.volume else 0;
+        applyPads(g, cfg.*);
         // A game writes its save a byte at a time, so the file is rewritten
         // at most this often while it plays, and once more on the way out.
         if (g.cart.sram_dirty and rl.GetTime() >= sram_next) {
@@ -715,9 +732,13 @@ fn windowed(
             // gets one byte per emulated frame, so a replay of it is a replay.
             const steps: u32 = if (ui.step) 1 else if (ui.fast) fast_forward_frames else 1;
             for (0..steps) |_| {
-                if (replay) |r| g.buttons = r.buttons(frames) else g.buttons = input.buttons(cfg.keys, 0, keyDown);
-                g.buttons2 = input.buttons(cfg.keys, 1, keyDown);
-                if (record) |*r| try r.append(gpa, g.buttons);
+                if (replay) |r| {
+                    g.pads[0].buttons = r.buttons(frames);
+                } else {
+                    g.pads[0].buttons = input.buttons(cfg.keys, 0, keyDown);
+                }
+                g.pads[1].buttons = input.buttons(cfg.keys, 1, keyDown);
+                if (record) |*r| try recordButtons(r, gpa, g.pads[0].buttons);
                 scheduler.runFrame(g, c);
                 frames += 1;
                 // Drained inside the loop: the ring holds well under a
@@ -726,10 +747,11 @@ fn windowed(
             }
             ui.step = false;
         } else {
-            g.buttons = 0;
-            g.buttons2 = 0;
+            g.pads[0].buttons = 0;
+            g.pads[1].buttons = 0;
         }
-        ui.pad = g.buttons;
+        ui.pad = g.pads[0].buttons;
+        ui.pad_six = cfg.pads[0] == .six;
 
         // Idle and paused frames have no audio to pace against, so the timer
         // takes over; a running game hands pacing back to the ring buffer.
@@ -765,9 +787,16 @@ fn windowed(
     if (path) |p| flushSram(io, g, p) catch |err| std.debug.print("cannot save SRAM: {t}\n", .{err});
     if (record) |*r| {
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args.record.?, .data = r.items });
-        std.debug.print("recorded {d} frames of input to {s}\n", .{ r.items.len, args.record.? });
+        std.debug.print("recorded {d} frames of input to {s}\n", .{ r.items.len / 2, args.record.? });
     }
     report(c, frames);
+}
+
+/// Which pad is in each port. Not part of `startMachine` alone: the option is
+/// a controller being swapped, not a machine being rebuilt, so the frame loop
+/// pushes it every frame and the menu takes effect without a reset.
+fn applyPads(g: *Genesis, cfg: Config) void {
+    for (&g.pads, cfg.pads) |*pad, kind| pad.six = kind == .six;
 }
 
 /// The window is a TV: whatever the source is putting out gets stretched to

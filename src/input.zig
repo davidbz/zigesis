@@ -12,7 +12,7 @@ const genesis = @import("genesis");
 
 /// Everything a key can be bound to. Both pads' buttons come first, each in
 /// `Genesis.buttons` order, so `padMask` is a shift rather than a switch and
-/// pad n's bindings are the eight entries at `n * pad_count`.
+/// pad n's bindings are the twelve entries at `n * pad_count`.
 pub const Action = enum {
     up,
     down,
@@ -22,6 +22,10 @@ pub const Action = enum {
     c,
     a,
     start,
+    z,
+    y,
+    x,
+    mode,
     p2_up,
     p2_down,
     p2_left,
@@ -30,6 +34,10 @@ pub const Action = enum {
     p2_c,
     p2_a,
     p2_start,
+    p2_z,
+    p2_y,
+    p2_x,
+    p2_mode,
     menu,
     pause,
     reset,
@@ -46,13 +54,13 @@ pub const Action = enum {
 
     pub const count = @typeInfo(Action).@"enum".fields.len;
     /// Buttons on one pad; actions past `pads * pad_count` are hotkeys.
-    pub const pad_count = @intFromEnum(Action.start) + 1;
+    pub const pad_count = @intFromEnum(Action.mode) + 1;
     pub const pads = 2;
 
     /// The `Genesis.buttons` bit this action holds down, or 0 for a hotkey.
-    pub fn padMask(a: Action) u8 {
+    pub fn padMask(a: Action) u16 {
         const i = @intFromEnum(a);
-        return if (i < pads * pad_count) @as(u8, 1) << @intCast(i % pad_count) else 0;
+        return if (i < pads * pad_count) @as(u16, 1) << @intCast(i % pad_count) else 0;
     }
 
     pub fn label(a: Action) [:0]const u8 {
@@ -65,6 +73,10 @@ pub const Action = enum {
             .c => "P1 Button C",
             .a => "P1 Button A",
             .start => "P1 Start",
+            .z => "P1 Button Z",
+            .y => "P1 Button Y",
+            .x => "P1 Button X",
+            .mode => "P1 Mode",
             .p2_up => "P2 Up",
             .p2_down => "P2 Down",
             .p2_left => "P2 Left",
@@ -73,6 +85,10 @@ pub const Action = enum {
             .p2_c => "P2 Button C",
             .p2_a => "P2 Button A",
             .p2_start => "P2 Start",
+            .p2_z => "P2 Button Z",
+            .p2_y => "P2 Button Y",
+            .p2_x => "P2 Button X",
+            .p2_mode => "P2 Mode",
             .menu => "Menu",
             .pause => "Pause",
             .reset => "Reset",
@@ -92,10 +108,11 @@ pub const Action = enum {
 
 pub const Bindings = [Action.count]u32;
 
-/// The PoC's keys (arrows, A/S/D, Enter) plus the hotkeys §5.1 asks for.
-/// Escape is the menu, so raylib's exit-on-escape has to be turned off.
+/// The PoC's keys (arrows, A/S/D, Enter) plus X/Y/Z and the hotkeys §5.1 asks
+/// for. Escape is the menu, so raylib's exit-on-escape has to be turned off.
 /// Pad 2 ships unbound: two players on one keyboard is a choice, not a
-/// default, and an unbound pad reads as "nothing pressed".
+/// default, and an unbound pad reads as "nothing pressed". So does Mode, which
+/// a handful of games read and no default key is worth a conflict over.
 pub const defaults: Bindings = blk: {
     var b: Bindings = @splat(0);
     b[@intFromEnum(Action.up)] = key_up;
@@ -105,6 +122,11 @@ pub const defaults: Bindings = blk: {
     b[@intFromEnum(Action.a)] = 'A';
     b[@intFromEnum(Action.b)] = 'S';
     b[@intFromEnum(Action.c)] = 'D';
+    // The six-button pad's top row sits above A/B/C, so its keys do too. They
+    // do nothing until a port is set to a six-button pad in the options.
+    b[@intFromEnum(Action.x)] = 'Q';
+    b[@intFromEnum(Action.y)] = 'W';
+    b[@intFromEnum(Action.z)] = 'E';
     b[@intFromEnum(Action.start)] = key_enter;
     b[@intFromEnum(Action.menu)] = key_escape;
     b[@intFromEnum(Action.pause)] = 'P';
@@ -142,11 +164,11 @@ const key_f12 = 301;
 /// Pad `pad`'s byte for this frame. `down` is the host's keyboard, which is
 /// raylib's `IsKeyDown` and nothing else — passing it in is what keeps the
 /// window out of this file.
-pub fn buttons(b: Bindings, pad: usize, down: *const fn (u32) bool) u8 {
-    var out: u8 = 0;
+pub fn buttons(b: Bindings, pad: usize, down: *const fn (u32) bool) u16 {
+    var out: u16 = 0;
     const base = pad * Action.pad_count;
     for (0..Action.pad_count) |i| {
-        if (b[base + i] != 0 and down(b[base + i])) out |= @as(u8, 1) << @intCast(i);
+        if (b[base + i] != 0 and down(b[base + i])) out |= @as(u16, 1) << @intCast(i);
     }
     return out;
 }
@@ -229,22 +251,29 @@ test "pad bits line up with the machine's button byte" {
     try std.testing.expectEqual(genesis.btn_up, Action.up.padMask());
     try std.testing.expectEqual(genesis.btn_a, Action.a.padMask());
     try std.testing.expectEqual(genesis.btn_start, Action.start.padMask());
-    try std.testing.expectEqual(@as(u8, 0), Action.menu.padMask());
+    // The six-button pad's four, in the order its extra read reports them.
+    try std.testing.expectEqual(genesis.btn_z, Action.z.padMask());
+    try std.testing.expectEqual(genesis.btn_y, Action.y.padMask());
+    try std.testing.expectEqual(genesis.btn_x, Action.x.padMask());
+    try std.testing.expectEqual(genesis.btn_mode, Action.mode.padMask());
+    try std.testing.expectEqual(genesis.btn_mode, Action.p2_mode.padMask());
+    try std.testing.expectEqual(@as(u16, 0), Action.menu.padMask());
 }
 
 test "bindings turn held keys into a pad byte, per pad" {
     const held = struct {
         fn down(key: u32) bool {
-            return key == 'A' or key == key_up or key == 'K';
+            return key == 'A' or key == key_up or key == 'K' or key == 'Q';
         }
     }.down;
     var b = defaults;
-    try std.testing.expectEqual(genesis.btn_a | genesis.btn_up, buttons(b, 0, &held));
+    const p1 = genesis.btn_a | genesis.btn_up | genesis.btn_x;
+    try std.testing.expectEqual(p1, buttons(b, 0, &held));
     // Pad 2 is unbound out of the box, and an unbound key is never held.
-    try std.testing.expectEqual(@as(u8, 0), buttons(b, 1, &held));
+    try std.testing.expectEqual(@as(u16, 0), buttons(b, 1, &held));
     b[@intFromEnum(Action.p2_start)] = 'K';
     try std.testing.expectEqual(genesis.btn_start, buttons(b, 1, &held));
-    try std.testing.expectEqual(genesis.btn_a | genesis.btn_up, buttons(b, 0, &held));
+    try std.testing.expectEqual(p1, buttons(b, 0, &held));
 }
 
 test "every key name round-trips, and fits the buffer they are written to" {

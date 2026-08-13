@@ -116,6 +116,14 @@ const zram_mask = zram_bytes - 1;
 const th_bit: u8 = 0x40;
 /// The six button bits a pad reports in one half of its multiplexed byte.
 const pad_bits: u8 = 0x3F;
+/// The four direction bits, which the six-button pad's extra reads drive as a
+/// group rather than as buttons.
+const dir_bits: u16 = btn_up | btn_down | btn_left | btn_right;
+/// How long TH has to stand still before a six-button pad forgets where it was
+/// in its sequence. The counter is reset by an RC network on the pad, at
+/// roughly 1.5 ms; a game that abandons a poll half way through starts the
+/// next one from the top because of it.
+const pad_reset_mclk = master_clock_hz * 3 / 2000;
 
 /// I/O register offsets within the block at $A10000, all on odd addresses.
 const io_mask: u24 = 0x1F;
@@ -191,14 +199,92 @@ pub fn romIsDomestic(rom: []const u8) bool {
 }
 
 // Controller bits, active high here and inverted on the way out to the ROM.
-pub const btn_up: u8 = 0x01;
-pub const btn_down: u8 = 0x02;
-pub const btn_left: u8 = 0x04;
-pub const btn_right: u8 = 0x08;
-pub const btn_b: u8 = 0x10;
-pub const btn_c: u8 = 0x20;
-pub const btn_a: u8 = 0x40;
-pub const btn_start: u8 = 0x80;
+// The low byte is what a three-button pad has; the high byte is the six-button
+// pad's second half, in the bit order its extra read reports them (M X Y Z).
+pub const btn_up: u16 = 0x01;
+pub const btn_down: u16 = 0x02;
+pub const btn_left: u16 = 0x04;
+pub const btn_right: u16 = 0x08;
+pub const btn_b: u16 = 0x10;
+pub const btn_c: u16 = 0x20;
+pub const btn_a: u16 = 0x40;
+pub const btn_start: u16 = 0x80;
+pub const btn_z: u16 = 0x100;
+pub const btn_y: u16 = 0x200;
+pub const btn_x: u16 = 0x400;
+pub const btn_mode: u16 = 0x800;
+
+/// One controller port. Both ports are the same circuit, so both are this.
+///
+/// TH is an output the ROM toggles to pick which half of the pad it sees. A
+/// six-button pad counts those toggles: the sixth read of a poll answers with
+/// every direction pressed, which is how a ROM tells the two pads apart, the
+/// seventh with X/Y/Z/Mode, and the eighth with every direction released.
+/// Three reads is all a three-button game does, so it never reaches any of
+/// that — until it does, which is why `six` is an option and not a default.
+pub const Pad = struct {
+    buttons: u16 = 0,
+    ctrl: u8 = 0,
+    data: u8 = 0,
+    /// Which pad is plugged in. Set by the frontend, never by the machine.
+    six: bool = false,
+    /// TH falling edges since the pad last forgot where it was: the four steps
+    /// of the sequence, cycling 1-2-3-4 rather than through zero, which is
+    /// only where a pad that has just been reset sits.
+    count: u3 = 0,
+    th_mclk: u64 = 0,
+
+    /// TH's level: high while it is an input, since the pad pulls it up.
+    fn thHigh(p: *const Pad) bool {
+        return p.ctrl & th_bit == 0 or p.data & th_bit != 0;
+    }
+
+    /// Every button reads low when pressed, so the byte is inverted on the way
+    /// out.
+    ///
+    /// With TH low the pad grounds D2 and D3 outright — they read as pressed
+    /// whatever the stick is doing, which is how a ROM tells a pad from an
+    /// empty port. Reporting the real left/right there instead breaks any
+    /// driver that ORs the two halves together: left and right then never
+    /// register at all, while every other button still works.
+    pub fn read(p: *const Pad) u8 {
+        const b = p.buttons;
+        const th = p.thHigh();
+        var low: u16 = if (th)
+            b & pad_bits // C B R L D U
+        else
+            (b & (btn_up | btn_down)) | btn_left | btn_right | ((b & (btn_a | btn_start)) >> 2);
+        if (p.six) {
+            if (th and p.count == 3) low = (b & (btn_b | btn_c)) | (b >> 8); // C B M X Y Z
+            if (!th and p.count == 3) low |= dir_bits; // S A 0 0 0 0
+            if (!th and p.count == 4) low &= ~dir_bits; // S A 1 1 1 1
+        }
+        return @truncate((if (th) th_bit else 0) | (~low & pad_bits));
+    }
+
+    pub fn writeData(p: *Pad, val: u8, mclk: u64) void {
+        const was = p.thHigh();
+        p.data = val;
+        p.edge(was, mclk);
+    }
+
+    pub fn writeCtrl(p: *Pad, val: u8, mclk: u64) void {
+        const was = p.thHigh();
+        p.ctrl = val;
+        p.edge(was, mclk);
+    }
+
+    /// Both registers decide TH's level, so both go through this: a six-button
+    /// pad counts the falling edges, and forgets a poll left half finished
+    /// rather than resuming it as part of the next one. A game polling once a
+    /// frame is 16 ms between polls and microseconds inside one, which is what
+    /// makes every frame's poll start from the top.
+    fn edge(p: *Pad, was: bool, mclk: u64) void {
+        if (mclk -| p.th_mclk > pad_reset_mclk) p.count = 0;
+        p.th_mclk = mclk;
+        if (was and !p.thHigh()) p.count = if (p.count >= 4) 1 else p.count + 1;
+    }
+};
 
 pub const Genesis = struct {
     rom: []const u8,
@@ -238,12 +324,9 @@ pub const Genesis = struct {
     /// Toggles per-instruction Z80 tracing to stderr; see `scheduler.zig`.
     z80_trace: bool = false,
 
-    buttons: u8 = 0,
-    pad_ctrl: u8 = 0,
-    pad_data: u8 = 0,
-    buttons2: u8 = 0,
-    pad2_ctrl: u8 = 0,
-    pad2_data: u8 = 0,
+    /// The two controller ports. The third one is an expansion connector with
+    /// nothing in it, so it has no `Pad`.
+    pads: [2]Pad = @splat(.{}),
 
     frame: u32 = 0,
     line: u32 = 0,
@@ -403,42 +486,25 @@ pub const Genesis = struct {
             io_version => version_no_expansion |
                 @as(u8, if (g.domestic) 0 else version_export) |
                 @as(u8, if (g.v.pal) version_pal else 0),
-            io_data1 => padByte(g.buttons, g.pad_ctrl, g.pad_data),
-            io_data2 => padByte(g.buttons2, g.pad2_ctrl, g.pad2_data),
+            io_data1 => g.pads[0].read(),
+            io_data2 => g.pads[1].read(),
             // Nothing is plugged into the expansion port: every line floats high.
             io_data3 => pad_bits,
-            io_ctrl1 => g.pad_ctrl,
-            io_ctrl2 => g.pad2_ctrl,
+            io_ctrl1 => g.pads[0].ctrl,
+            io_ctrl2 => g.pads[1].ctrl,
             else => 0x00,
         };
     }
 
     fn ioWrite(g: *Genesis, addr: u24, val: u8) void {
+        const mclk = g.now();
         switch (addr & io_mask) {
-            io_data1 => g.pad_data = val,
-            io_ctrl1 => g.pad_ctrl = val,
-            io_data2 => g.pad2_data = val,
-            io_ctrl2 => g.pad2_ctrl = val,
+            io_data1 => g.pads[0].writeData(val, mclk),
+            io_ctrl1 => g.pads[0].writeCtrl(val, mclk),
+            io_data2 => g.pads[1].writeData(val, mclk),
+            io_ctrl2 => g.pads[1].writeCtrl(val, mclk),
             else => {},
         }
-    }
-
-    /// Three-button pad. TH is an output the ROM toggles to pick which half of
-    /// the pad it sees; every button reads low when pressed. Both ports are
-    /// the same circuit, so both call this.
-    ///
-    /// With TH low the pad grounds D2 and D3 outright — they read as pressed
-    /// whatever the stick is doing, which is how a ROM tells a pad from an
-    /// empty port. Reporting the real left/right there instead breaks any
-    /// driver that ORs the two halves together: left and right then never
-    /// register at all, while every other button still works.
-    fn padByte(b: u8, ctrl: u8, data: u8) u8 {
-        const th = ctrl & th_bit == 0 or data & th_bit != 0;
-        const low: u8 = if (th)
-            b & pad_bits // C B R L D U
-        else
-            (b & (btn_up | btn_down)) | btn_left | btn_right | ((b & (btn_a | btn_start)) >> 2);
-        return (if (th) th_bit else 0) | (~low & pad_bits);
     }
 
     /// RESET pin semantics: while held (bit 0 clear), the Z80's registers
@@ -678,31 +744,29 @@ test "the header's region field, in both encodings, picks the machine" {
     try testing.expect(!romIsPal(too_short));
 }
 
-test "ioWrite roundtrips pad_data and pad_ctrl" {
+test "ioWrite roundtrips pad data and ctrl" {
     var c = Cpu{};
     var g = Genesis{ .rom = &.{}, .cpu = &c };
 
     g.write8(0xA10003, 0x55);
-    try testing.expectEqual(@as(u8, 0x55), g.pad_data);
+    try testing.expectEqual(@as(u8, 0x55), g.pads[0].data);
     g.write8(0xA10009, 0x40);
-    try testing.expectEqual(@as(u8, 0x40), g.pad_ctrl);
+    try testing.expectEqual(@as(u8, 0x40), g.pads[0].ctrl);
 }
 
 test "controller: TH driven high reads face buttons, TH driven low reads Start/A" {
-    var c = Cpu{};
-    var g = Genesis{ .rom = &.{}, .cpu = &c };
-    g.pad_ctrl = 0x40; // TH configured as an output
-    g.buttons = btn_c | btn_left | btn_a | btn_start;
+    var p = Pad{ .ctrl = 0x40 }; // TH configured as an output
+    p.buttons = btn_c | btn_left | btn_a | btn_start;
 
-    g.pad_data = 0x40; // TH high: C,B,Right,Left,Down,Up
-    const th_high = Genesis.padByte(g.buttons, g.pad_ctrl, g.pad_data);
+    p.data = 0x40; // TH high: C,B,Right,Left,Down,Up
+    const th_high = p.read();
     try testing.expectEqual(@as(u8, 0x40), th_high & 0x40); // TH echoed back
     try testing.expectEqual(@as(u8, 0), th_high & btn_c); // pressed -> bit low
     try testing.expectEqual(@as(u8, 0), th_high & btn_left); // pressed -> bit low
     try testing.expectEqual(@as(u8, btn_up | btn_down | btn_right | btn_b), th_high & 0x3F);
 
-    g.pad_data = 0x00; // TH low: Start,A,0,0,Down,Up
-    const th_low = Genesis.padByte(g.buttons, g.pad_ctrl, g.pad_data);
+    p.data = 0x00; // TH low: Start,A,0,0,Down,Up
+    const th_low = p.read();
     try testing.expectEqual(@as(u8, 0), th_low & 0x40);
     try testing.expectEqual(@as(u8, 0), th_low & 0x10); // A -> bit4 low
     try testing.expectEqual(@as(u8, 0), th_low & 0x20); // Start -> bit5 low
@@ -716,8 +780,9 @@ test "the second port is a pad of its own, and the third is empty" {
     var g = Genesis{ .rom = &.{}, .cpu = &c };
     g.write8(0xA1000B, 0x40); // TH an output on port 2
     g.write8(0xA10005, 0x40); // ...driven high
-    g.buttons = btn_c; // player 1 holding C must not show up on port 2
-    g.buttons2 = btn_start | btn_left;
+    g.pads[0].buttons = btn_c | btn_x; // player 1's buttons stay on port 1
+    g.pads[1].six = true;
+    g.pads[1].buttons = btn_start | btn_left;
 
     try testing.expectEqual(@as(u8, 0x40), g.read8(0xA1000B));
     try testing.expectEqual(@as(u8, 0), g.read8(0xA10005) & btn_left);
@@ -726,15 +791,75 @@ test "the second port is a pad of its own, and the third is empty" {
 }
 
 test "controller: TH configured as an input always reads the TH-high state" {
-    var c = Cpu{};
-    var g = Genesis{ .rom = &.{}, .cpu = &c };
-    g.pad_ctrl = 0x00; // TH is an input
-    g.pad_data = 0x00; // irrelevant while TH is an input
-    g.buttons = btn_up;
+    var p = Pad{ .buttons = btn_up };
+    p.ctrl = 0x00; // TH is an input
+    p.data = 0x00; // irrelevant while TH is an input
 
-    const got = Genesis.padByte(g.buttons, g.pad_ctrl, g.pad_data);
+    const got = p.read();
     try testing.expectEqual(@as(u8, 0x40), got & 0x40);
     try testing.expectEqual(@as(u8, 0), got & btn_up);
+}
+
+/// The eight reads of one poll, TH driven high then low four times over, which
+/// is the whole of the six-button protocol.
+fn pollPad(p: *Pad, mclk: u64) [8]u8 {
+    var out: [8]u8 = undefined;
+    for (&out, 0..) |*byte, i| {
+        p.writeData(if (i % 2 == 0) th_bit else 0, mclk);
+        byte.* = p.read();
+    }
+    return out;
+}
+
+/// Up, Start, X and Z held: one button from each of the four groups a poll
+/// reports, which is what makes the eight answers below tell each other apart.
+const poll_buttons = btn_up | btn_start | btn_x | btn_z;
+
+/// What those eight reads say, in order, with `poll_buttons` held. A button
+/// reads low, so a bit that is *clear* is one that is pressed.
+const poll_expected = [8]u8{
+    0x7E, // 1  -1CBRLDU, Up down
+    0x12, // 2  -0SA00DU, Start down, D2/D3 grounded
+    0x7E, // 3
+    0x12, // 4
+    0x7E, // 5
+    0x10, // 6  -0SA0000, every direction forced low: "I am a six-button pad"
+    0x7A, // 7  -1CBMXYZ, X and Z down
+    0x1F, // 8  -0SA1111, every direction forced high
+};
+
+test "a six-button pad answers its extra reads, and starts over on the ninth" {
+    var p = Pad{ .ctrl = th_bit, .six = true, .buttons = poll_buttons };
+
+    try testing.expectEqual(poll_expected, pollPad(&p, 0));
+    // The counter cycles rather than sticking, so a second poll with no pause
+    // between them is the same eight answers again.
+    try testing.expectEqual(poll_expected, pollPad(&p, 0));
+}
+
+test "a three-button pad never leaves its two halves" {
+    var p = Pad{ .ctrl = th_bit, .buttons = poll_buttons };
+
+    // The counter still runs; nothing reads it. So reads 6-8 are reads 1-3
+    // over again, and X and Z are in none of them.
+    const poll = pollPad(&p, 0);
+    for (poll, 0..) |byte, i| try testing.expectEqual(poll_expected[i % 2], byte);
+}
+
+test "a six-button pad forgets a poll left half finished" {
+    var p = Pad{ .ctrl = th_bit, .six = true, .buttons = poll_buttons };
+
+    // Three falling edges in, which is where the extra reads come from...
+    for (0..6) |i| p.writeData(if (i % 2 == 0) th_bit else 0, 0);
+    try testing.expectEqual(@as(u3, 3), p.count);
+    try testing.expectEqual(poll_expected[5], p.read());
+
+    // ...and a game that goes away for longer than the pad's RC timeout finds
+    // it back at the top instead of half way through.
+    p.writeData(th_bit, pad_reset_mclk + 1);
+    p.writeData(0, pad_reset_mclk + 2);
+    try testing.expectEqual(@as(u3, 1), p.count);
+    try testing.expectEqual(poll_expected[1], p.read());
 }
 
 test "the H/V counter port reads the master clock, not the CPU's own cycles" {
