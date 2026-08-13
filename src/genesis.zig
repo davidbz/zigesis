@@ -393,12 +393,18 @@ pub const Genesis = struct {
     /// Three-button pad. TH is an output the ROM toggles to pick which half of
     /// the pad it sees; every button reads low when pressed. Both ports are
     /// the same circuit, so both call this.
+    ///
+    /// With TH low the pad grounds D2 and D3 outright — they read as pressed
+    /// whatever the stick is doing, which is how a ROM tells a pad from an
+    /// empty port. Reporting the real left/right there instead breaks any
+    /// driver that ORs the two halves together: left and right then never
+    /// register at all, while every other button still works.
     fn padByte(b: u8, ctrl: u8, data: u8) u8 {
         const th = ctrl & th_bit == 0 or data & th_bit != 0;
         const low: u8 = if (th)
             b & pad_bits // C B R L D U
         else
-            (b & (btn_up | btn_down)) | ((b & btn_a) >> 2) | ((b & btn_start) >> 2);
+            (b & (btn_up | btn_down)) | btn_left | btn_right | ((b & (btn_a | btn_start)) >> 2);
         return (if (th) th_bit else 0) | (~low & pad_bits);
     }
 
@@ -623,7 +629,9 @@ test "controller: TH driven high reads face buttons, TH driven low reads Start/A
     try testing.expectEqual(@as(u8, 0), th_low & 0x40);
     try testing.expectEqual(@as(u8, 0), th_low & 0x10); // A -> bit4 low
     try testing.expectEqual(@as(u8, 0), th_low & 0x20); // Start -> bit5 low
-    try testing.expectEqual(@as(u8, 0x0C), th_low & 0x0C); // bits 2-3: always unpressed
+    // D2 and D3 are grounded by the pad itself, so they read pressed even
+    // though only Left is held: this is the "a pad is plugged in" signature.
+    try testing.expectEqual(@as(u8, 0), th_low & 0x0C);
 }
 
 test "the second port is a pad of its own, and the third is empty" {

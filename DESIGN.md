@@ -707,6 +707,14 @@ pressed" until someone binds it. The genesis side grew the port to match:
 `buttons2`/`pad2_ctrl`/`pad2_data`, `$A10005`/`$A1000B`, and one shared
 `padByte` decoder for both ports, with the third port left reading as empty.
 
+That decoder has one detail worth writing down, because getting it wrong
+costs exactly two buttons. With TH driven low the pad grounds D2 and D3
+outright: they read as pressed whatever the stick is doing, and a ROM uses
+that dead pair as the signature of a pad being plugged in at all. Reporting
+the real left and right there instead looks harmless — the TH-high half still
+carries them — but a driver that merges the two halves by ORing them then
+never sees left or right at all, while every other button keeps working.
+
 **The config file** is `key = value` text at
 `$XDG_CONFIG_HOME/zigesis/config.ini` (then `$HOME/.config`, then `%APPDATA%`,
 then next to the exe), written on every change the menu makes and written
