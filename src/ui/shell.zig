@@ -668,32 +668,47 @@ fn drawCartridge(ui: *const Ui) void {
     const w = rl.GetScreenWidth() - x - fs;
     const h = marquee + pad + rowHeight() * @as(c_int, @intCast(ui.card_n + 1));
 
-    // Nothing is allowed out of the cabinet: a long title is cut off at the
+    // Nothing is allowed out of the cabinet: a long reading is cut off at the
     // edge of the panel rather than drawn across the menu.
-    rl.BeginScissorMode(x, y, w, h);
-    defer rl.EndScissorMode();
+    {
+        rl.BeginScissorMode(x, y, w, h);
+        defer rl.EndScissorMode();
 
-    rl.DrawRectangle(x, y, w, h, panel);
-    rl.DrawRectangle(x, y, w, marquee, hilite);
-    rl.DrawText(&ui.card_title, x + pad, y + half(marquee - fs), fs, ink);
-    rl.DrawRectangleLines(x, y, w, h, hilite);
+        rl.DrawRectangle(x, y, w, h, panel);
+        rl.DrawRectangle(x, y, w, marquee, hilite);
+        rl.DrawRectangleLines(x, y, w, h, hilite);
 
-    var line = y + marquee + pad;
-    rl.DrawText(&ui.card_sub, x + pad, line, small, dim);
-    line += rowHeight();
-
-    for (ui.card[0..ui.card_n]) |*row| {
-        rl.DrawText(&row.label, x + pad, line, small, dim);
-        // Values hang off the right edge like a score, which lines them up
-        // without the font having to be fixed-width. It is not.
-        const width = rl.MeasureText(&row.value, small);
-        rl.DrawText(&row.value, x + w - pad - width, line, small, switch (row.tone) {
-            .plain => fg,
-            .good => good,
-            .bad => bad,
-        });
+        var line = y + marquee + pad;
+        rl.DrawText(&ui.card_sub, x + pad, line, small, dim);
         line += rowHeight();
+
+        for (ui.card[0..ui.card_n]) |*row| {
+            rl.DrawText(&row.label, x + pad, line, small, dim);
+            // Values hang off the right edge like a score, which lines them up
+            // without the font having to be fixed-width. It is not. One that
+            // is too wide to hang there starts after its label instead and is
+            // cut on the right by the panel: sliding further left would put it
+            // under the label, and two strings in the same pixels are less
+            // readable than either of them alone.
+            const width = rl.MeasureText(&row.value, small);
+            const label_end = x + pad + rl.MeasureText(&row.label, small) + pad;
+            const value_x = @max(label_end, x + w - pad - width);
+            rl.DrawText(&row.value, value_x, line, small, switch (row.tone) {
+                .plain => fg,
+                .good => good,
+                .bad => bad,
+            });
+            line += rowHeight();
+        }
     }
+
+    // The name goes last because it brings its own scissor: raylib's is one
+    // rectangle rather than a stack, so anything drawn after it would be
+    // clipped to the marquee. A title is as long as it likes on a cartridge —
+    // half a menu page is not enough for some of them — so it scrolls here for
+    // the same reason it scrolls on the status bar.
+    const title = std.mem.sliceTo(&ui.card_title, 0);
+    drawName(title, x + pad, w - pad * 2, y + half(marquee - fs), fs, ink);
 }
 
 fn drawRow(y: c_int, selected: bool) void {
@@ -789,19 +804,35 @@ fn held(pad: u8, action: Action) bool {
     return pad & action.padMask() != 0;
 }
 
-/// "QUICK " and two key names with a slash between them, plus the terminator:
-/// the longest the hint below can get however the two keys are bound.
-const quick_hint_buf = "QUICK /".len + 2 * input.max_key_name + 1;
+/// Two key names with a slash between them, plus the terminator: the longest
+/// the quicksave hint can get however its two keys are bound.
+const quick_hint_buf = 2 * input.max_key_name + 2;
+
+/// About this many characters of the cartridge's name is the least worth
+/// showing. A hint that would cut it shorter than that gives way instead.
+const name_floor_chars = 4;
 
 /// What the bar says about the quicksave: the two keys that drive it, so
-/// nobody has to open the menu to find out which they are.
+/// nobody has to open the menu to find out which they are. The disk beside
+/// them says what they do — see `drawIcon`.
 fn quickHint(cfg: *const Config, buf: *[quick_hint_buf]u8) [:0]const u8 {
     var save: [input.max_key_name]u8 = undefined;
     var load: [input.max_key_name]u8 = undefined;
-    return std.fmt.bufPrintZ(buf, "QUICK {s}/{s}", .{
+    return std.fmt.bufPrintZ(buf, "{s}/{s}", .{
         input.keyName(cfg.keys[@intFromEnum(Action.quick_save)], &save),
         input.keyName(cfg.keys[@intFromEnum(Action.quick_load)], &load),
-    }) catch "QUICK";
+    }) catch "?";
+}
+
+/// One key name, terminated for raylib: `input.keyName` writes a slice, and
+/// everything that draws here wants a C string.
+const key_hint_buf = input.max_key_name + 1;
+
+fn keyHint(cfg: *const Config, action: Action, buf: *[key_hint_buf]u8) [:0]const u8 {
+    var name: [input.max_key_name]u8 = undefined;
+    return std.fmt.bufPrintZ(buf, "{s}", .{
+        input.keyName(cfg.keys[@intFromEnum(action)], &name),
+    }) catch "?";
 }
 
 fn drawBar(ui: *const Ui, cfg: *const Config) void {
@@ -815,18 +846,21 @@ fn drawBar(ui: *const Ui, cfg: *const Config) void {
     rl.DrawRectangleGradientV(0, y, w, h, bar_top, bar_bottom);
     rl.DrawRectangle(0, y, w, 1, bar_rule);
 
+    // The pad is drawn first because where it ends is what the right-hand side
+    // has to stay clear of: the hints there give way, the name does not.
+    const name_x = gap + drawPad(gap, y, h, ui.pad) + fs;
+    const floor = name_x + fs * name_floor_chars;
+
     // Right to left, because everything on this side has a width of its own
     // and the cartridge's name is the one thing that can be cut short.
     var buf: [32]u8 = undefined;
     var right = w - gap;
     if (ui.paused) {
-        right = barText(right, ty, fs, "PAUSED", hilite);
-    } else if (ui.fast) {
-        right = barText(right, ty, fs, "FAST", hilite);
+        right = barIcon(right, ty, fs, .pause, hilite);
     } else if (std.fmt.bufPrintZ(&buf, "{d} FPS", .{rl.GetFPS()})) |fps| {
-        right = barText(right, ty, fs, fps, dim);
+        right = barField(right, ty, fs, fps, fps_field, dim);
     } else |_| {}
-    if (!cfg.audio or cfg.volume == 0) right = barText(right, ty, fs, "MUTE", bad);
+    if (!cfg.audio or cfg.volume == 0) right = barIcon(right, ty, fs, .mute, bad);
 
     var age_buf: [32]u8 = undefined;
     const empty = ui.stamps[quick_slot] == 0;
@@ -834,21 +868,135 @@ fn drawBar(ui: *const Ui, cfg: *const Config) void {
         right = barText(right, ty, fs, age, if (empty) dim else good);
     }
     var keys: [quick_hint_buf]u8 = undefined;
-    right = barText(right, ty, fs, quickHint(cfg, &keys), dim);
+    right = barHint(right, floor, ty, fs, .disk, quickHint(cfg, &keys), dim);
+    var key: [key_hint_buf]u8 = undefined;
+    const fast_key = keyHint(cfg, .fast_forward, &key);
+    right = barHint(right, floor, ty, fs, .fast, fast_key, if (ui.fast) hilite else dim);
 
-    const name_x = gap + drawPad(gap, y, h, ui.pad) + fs;
     const name: [:0]const u8 = if (ui.card_n == 0) "NO CARTRIDGE" else std.mem.sliceTo(&ui.card_title, 0);
-    if (right <= name_x) return;
-    rl.BeginScissorMode(name_x, y, right - name_x, h);
-    defer rl.EndScissorMode();
-    rl.DrawText(name.ptr, name_x, ty, fs, if (ui.card_n == 0) dim else fg);
+    drawName(name, name_x, right - name_x, ty, fs, if (ui.card_n == 0) dim else fg);
 }
+
+/// Pixels a scrolling title moves per second, in font sizes: slow enough to
+/// read, and tied to the font so it looks the same at 1x and fullscreen.
+const marquee_rate = 1.5;
+/// The blank between the end of a scrolling title and the copy chasing it.
+const marquee_gap_chars = 4;
+
+/// The cartridge's name, scrolled when it does not fit rather than cut off at
+/// a letter: a title is the one thing on the bar that can be any length. The
+/// second copy is what makes the wrap seamless — it arrives as the first
+/// leaves, so there is never a gap the whole box wide.
+fn drawName(name: [:0]const u8, x: c_int, box: c_int, y: c_int, fs: c_int, color: rl.Color) void {
+    if (box <= 0) return;
+    rl.BeginScissorMode(x, y, box, fs);
+    defer rl.EndScissorMode();
+
+    const width = rl.MeasureText(name.ptr, fs);
+    if (width <= box) return rl.DrawText(name.ptr, x, y, fs, color);
+
+    const span = width + fs * marquee_gap_chars;
+    const off = marqueeOffset(rl.GetTime(), span, fs);
+    rl.DrawText(name.ptr, x - off, y, fs, color);
+    rl.DrawText(name.ptr, x - off + span, y, fs, color);
+}
+
+/// How far into its loop a marquee is. Wall-clock driven, which is fine
+/// because nothing here is the emulated machine — §6.3's determinism rule is
+/// about the core, and this is chrome.
+fn marqueeOffset(t: f64, span: c_int, fs: c_int) c_int {
+    const travelled = t * marquee_rate * @as(f64, @floatFromInt(fs));
+    return @intFromFloat(@mod(travelled, @as(f64, @floatFromInt(span))));
+}
+
+/// The frame rate is the one thing on the bar whose text changes every frame,
+/// and the whole right-hand side is laid out from its width — so it is drawn
+/// in a field wide enough for any reading rather than shrink-wrapped to the
+/// digits it happens to have. Uncapped, the reading changes every frame, and
+/// a title whose width sits near where its box ends up otherwise flips
+/// between scrolling and standing still several times a second.
+const fps_field = "9999 FPS";
 
 /// Draws one right-aligned item and hands back the left edge for the next.
 fn barText(x: c_int, y: c_int, fs: c_int, text: [:0]const u8, color: rl.Color) c_int {
     const width = rl.MeasureText(text.ptr, fs);
     rl.DrawText(text.ptr, x - width, y, fs, color);
     return x - width - fs;
+}
+
+/// Like `barText`, but the item is never narrower than `field`: the text is
+/// right-aligned inside it, so what is drawn to its left holds still while it
+/// changes.
+fn barField(x: c_int, y: c_int, fs: c_int, text: [:0]const u8, field: [:0]const u8, color: rl.Color) c_int {
+    _ = barText(x, y, fs, text, color);
+    return x - @max(rl.MeasureText(text.ptr, fs), rl.MeasureText(field.ptr, fs)) - fs;
+}
+
+/// A key hint: the icon for what the key does and the key itself, drawn as one
+/// item. A hint is a reminder and the cartridge's name is what the bar is for,
+/// so at 1x, where there is not room for both, one that reaches `floor` stays
+/// off rather than crowding the name out.
+fn barHint(x: c_int, floor: c_int, y: c_int, fs: c_int, icon: Icon, text: [:0]const u8, color: rl.Color) c_int {
+    const width = fs + half(fs) + rl.MeasureText(text.ptr, fs);
+    if (x - width < floor) return x;
+    rl.DrawText(text.ptr, x - rl.MeasureText(text.ptr, fs), y, fs, color);
+    drawIcon(x - width, y, fs, icon, color);
+    return x - width - fs;
+}
+
+/// One icon on its own, right-aligned like `barText`.
+fn barIcon(x: c_int, y: c_int, fs: c_int, icon: Icon, color: rl.Color) c_int {
+    drawIcon(x - fs, y, fs, icon, color);
+    return x - fs - fs;
+}
+
+const Icon = enum { fast, disk, pause, mute };
+
+/// The bar says more than it has room for in words, and the default font has
+/// no glyph for any of these, so they are primitives: two chevrons for
+/// fast-forward, a disk for the save slots, two bars for pause, and a speaker
+/// with a bite out of it for silence. Drawn in an `fs` box, inset to sit at
+/// the weight of the text beside it.
+///
+/// Triangle vertices go in the winding raylib's own quads use — top-left,
+/// bottom-left, then the far point — or backface culling eats them.
+fn drawIcon(x: c_int, y: c_int, fs: c_int, icon: Icon, color: rl.Color) void {
+    const s = fs - @divTrunc(fs, 4);
+    const ix = x + half(fs - s);
+    const iy = y + half(fs - s);
+    const q = @max(1, @divTrunc(s, 4));
+    switch (icon) {
+        .fast => {
+            const w = half(s);
+            for (0..2) |i| {
+                const cx = ix + @as(c_int, @intCast(i)) * w;
+                rl.DrawTriangle(v2(cx, iy), v2(cx, iy + s), v2(cx + w - 1, iy + half(s)), color);
+            }
+        },
+        // Mostly solid: at a status bar's size a floppy drawn with a real
+        // shutter and label loses so much of its square that it reads as a
+        // second pause icon. The clipped corner is what carries it, and the
+        // label band is detail that only shows up on a big window.
+        .disk => {
+            rl.DrawRectangle(ix, iy, s, s, color);
+            const r = ix + s;
+            rl.DrawTriangle(v2(r - q * 2, iy), v2(r, iy + q * 2), v2(r, iy), bar_bottom);
+            rl.DrawRectangle(ix + q, iy + s - q * 2, s - q * 2, q, bar_bottom);
+        },
+        .pause => {
+            rl.DrawRectangle(ix, iy, q, s, color);
+            rl.DrawRectangle(ix + s - q, iy, q, s, color);
+        },
+        .mute => {
+            rl.DrawRectangle(ix, iy + q, q, s - q * 2, color);
+            rl.DrawTriangle(v2(ix + s, iy), v2(ix + q, iy + half(s)), v2(ix + s, iy + s), color);
+            rl.DrawLineEx(v2(ix, iy + s), v2(ix + s, iy), @floatFromInt(@max(1, @divTrunc(s, 5))), bar_bottom);
+        },
+    }
+}
+
+fn v2(x: c_int, y: c_int) rl.Vector2 {
+    return .{ .x = @floatFromInt(x), .y = @floatFromInt(y) };
 }
 
 /// The pad, lit by the byte the machine is being handed this frame — which
@@ -993,9 +1141,26 @@ test "every pad button has a light on the bar, and only one" {
 
     const cfg = Config{};
     var buf: [quick_hint_buf]u8 = undefined;
-    try std.testing.expectEqualStrings("QUICK F6/F7", quickHint(&cfg, &buf));
+    try std.testing.expectEqualStrings("F6/F7", quickHint(&cfg, &buf));
     try std.testing.expect(held(input.Action.start.padMask(), .start));
     try std.testing.expect(!held(input.Action.start.padMask(), .a));
+}
+
+test "a long title scrolls a loop and starts over" {
+    const fs = 20;
+    const span = 300;
+    try std.testing.expectEqual(@as(c_int, 0), marqueeOffset(0, span, fs));
+
+    // Inside the loop it only ever moves left, and it never leaves a gap: the
+    // chasing copy is drawn at `span`, so the offset has to stay under it.
+    var last: c_int = 0;
+    var t: f64 = 0;
+    while (t < 60) : (t += 0.1) {
+        const off = marqueeOffset(t, span, fs);
+        try std.testing.expect(off >= 0 and off < span);
+        if (off < last) try std.testing.expect(last > span - fs); // only at the wrap
+        last = off;
+    }
 }
 
 test "every action has a row on the keys page" {

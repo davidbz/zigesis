@@ -230,7 +230,11 @@ One window, simple design, no toolbar clutter. States:
   lit marquee, and a scoreboard of what the header at $100 says (copyright,
   serial, region against the timing being run, devices, size, backup RAM,
   and whether the checksum matches the ROM — green or red). Nothing here is
-  looked up anywhere: every reading comes out of the cartridge itself.
+  looked up anywhere: every reading comes out of the cartridge itself. The
+  name on the marquee scrolls when it is longer than the card, the same
+  scroll the status bar uses; a scoreboard reading too wide to hang off the
+  right edge starts after its label instead and is cut by the panel, rather
+  than sliding left underneath the label.
 
 Under all three states sits a status bar, two lines of the menu's font tall.
 It is chrome the window is *sized* for, not an overlay: the picture is drawn
@@ -238,9 +242,34 @@ into what is left above it, so nothing on the bar ever covers the game. Left
 to right it carries the pad — the cross and A/B/C/START, lit by the button
 byte the machine is being handed this frame, which is also what a replay is
 playing back — then the cartridge's name off its own header, and on the right
-the quicksave's two keys with how old the quicksave is, a MUTE badge when the
-volume is off, and the frame rate, which reads PAUSED while the machine is
-stopped. Everything on it is state the shell already held.
+the fast-forward key and the quicksave's two keys with how old the quicksave
+is, a badge when the volume is off, and the frame rate, which gives way to a
+pause mark while the machine is stopped. Everything on it is state the shell
+already held.
+
+What each key does is said with a mark rather than a word — chevrons for
+fast-forward, a disk for the save slots, two bars for pause, a struck-through
+speaker for silence — because a word wide enough to be unambiguous (FAST,
+QUICK, MUTE) costs more of the bar than the key name beside it. They are
+raylib primitives: the default font has no glyph for any of them, and a font
+that does is a dependency and a file to ship. The mark for a hotkey that is
+*on* lights up rather than adding a second item, so fast-forward costs the
+same width held as not.
+
+Two things stretch to the window rather than being sized for it. The
+cartridge's name scrolls when it does not fit, seamlessly (a second copy
+arrives as the first leaves), because a title is the one thing on the bar
+that can be any length. And the key hints give way: below about a 2x window
+there is no room for both them and the name, and the name is what the bar is
+for.
+
+Which makes one rule the whole right-hand side depends on: an item whose text
+changes gets a field wide enough for anything it can say, not a box shrink-
+wrapped to what it says this frame. The bar is laid out right to left, so a
+frame-rate reading that is one pixel wider moves every boundary left of it,
+including the edge the title measures itself against — and a title near that
+width flips between scrolling and standing still as fast as the number
+changes, which uncapped is every frame.
 
 Key configuration UI: pick an action, press a key, it rebinds; Escape
 cancels; conflicts are highlighted. Bindings live in the config file.
@@ -791,13 +820,15 @@ in both encodings, the second port and the empty third, list scrolling,
 value clamping and region wrap, and that every action has a row on the keys
 page. 111 tests green.
 
-Ceilings, and one thing that cannot be checked here:
+Ceilings, and how the one thing that looks uncheckable here is checked:
 
-- The devcontainer has X sockets but no authorisation and no screenshot
-  tool, so the window path exits through its `NoDisplay` guard. Everything
-  above the drawing calls is unit-tested; the drawing itself was not seen
-  running in this environment. Config persistence *was* verified end to end
-  by running the binary with `XDG_CONFIG_HOME` pointed at a scratch dir.
+- The devcontainer's own X sockets have no authorisation, so the window path
+  exits through its `NoDisplay` guard against `$DISPLAY`. The drawing *can*
+  be seen here: `Xvfb :99 -screen 0 1600x1000x24` and
+  `DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1`, with raylib's `TakeScreenshot` to
+  get a picture back out. Everything above the drawing calls is unit-tested
+  either way. Config persistence is verified end to end by running the
+  binary with `XDG_CONFIG_HOME` pointed at a scratch dir.
 - Escape cancels a rebind and backs out of every page, so Escape is not
   bindable. That is the price of it always being the way out.
 - Rebinding takes the next key with no conflict check; the keys page paints
@@ -994,7 +1025,8 @@ sweep, the tests, and the window all get the same machine.
 **Nice-to-haves from §5.1**, all three cheap because the plumbing was already
 there: fast-forward (Tab, held) runs four emulated frames per drawn one with
 the drawn rate pinned to the video rate, so the speed-up is exactly 4x rather
-than however fast the box is; frame advance (F8) pauses and runs exactly one
+than however fast the box is, and the bar carries its key under the chevrons
+of §5.2, lit while it is held; frame advance (F8) pauses and runs exactly one
 frame, repeating while held; screenshot (F12) writes the cropped picture
 beside the ROM numbered by frame. Each is one `input.Action` with a default
 binding, one branch in `shell.hotkeys`, and a few lines in the frame loop.
