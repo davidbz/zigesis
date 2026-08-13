@@ -47,6 +47,14 @@ const max_atten: u16 = 0x3ff;
 /// Half the envelope's range, where an SSG-EG segment turns around.
 const ssg_atten: u16 = 0x200;
 
+/// The SSG-EG register ($90): bit 3 switches it on, and the low three bits
+/// name one of the eight segment shapes.
+const ssg_hold: u4 = 0x1;
+const ssg_alternate: u4 = 0x2;
+const ssg_attack: u4 = 0x4;
+const ssg_enable: u4 = 0x8;
+const ssg_shape: u4 = ssg_attack | ssg_alternate | ssg_hold;
+
 /// The multiplexer gives each channel four of the 24 cycles in a sample and
 /// drives its real value on three of them (see `dacLevel`), so six channels
 /// of ±256 peak at 4608 — scaled here to about three quarters of an i16, so
@@ -617,35 +625,53 @@ pub const Ym2612 = struct {
         return @intCast(@min(63, @as(u8, base) * 2 + scaling));
     }
 
-    fn envelopeStep(y: *Ym2612, slot: usize, tick: bool) void {
-        const ssg = y.ssg[slot];
-        const ssg_on = ssg & 0x08 != 0;
-        const key = y.key[slot];
+    /// What SSG-EG asks of this sample, once the inversion latches have been
+    /// advanced.
+    const Segment = struct {
+        on: bool,
+        restart: bool = false,
+        reset_phase: bool = false,
+        /// The segment has run into its hold, so the envelope stays where it
+        /// is instead of releasing.
+        hold_up: bool = false,
+    };
 
-        // SSG-EG turns the tail of the envelope into a repeating segment: at
-        // half attenuation the operator restarts, holds, or flips into an
-        // inverted (rising) segment, which is what makes those patches buzz.
-        var restart = false;
-        var reset_phase = false;
-        var hold_up = false;
+    /// SSG-EG turns the tail of the envelope into a repeating segment: at half
+    /// attenuation the operator restarts, holds, or flips into an inverted
+    /// (rising) segment, which is what makes those patches buzz.
+    fn ssgSegment(y: *Ym2612, slot: usize) Segment {
+        const ssg = y.ssg[slot];
+        const key = y.key[slot];
+        const turn = ssg_alternate | ssg_hold;
+
+        var seg = Segment{ .on = ssg & ssg_enable != 0 };
         var dir = false;
-        if (ssg_on) {
+        if (seg.on) {
             dir = y.ssg_dir[slot];
             if (y.level[slot] & ssg_atten != 0) {
-                if (ssg & 0x03 == 0x00) reset_phase = true;
-                if (ssg & 0x01 == 0x00) restart = true;
-                if (ssg & 0x03 == 0x02) dir = !dir;
-                if (ssg & 0x03 == 0x03) dir = true;
+                if (ssg & turn == 0) seg.reset_phase = true;
+                if (ssg & ssg_hold == 0) seg.restart = true;
+                if (ssg & turn == ssg_alternate) dir = !dir;
+                if (ssg & turn == turn) dir = true;
             }
-            hold_up = key and (ssg & 0x07 == 0x05 or ssg & 0x07 == 0x03);
+            seg.hold_up = key and (ssg & ssg_shape == ssg_attack | ssg_hold or
+                ssg & ssg_shape == ssg_alternate | ssg_hold);
             dir = dir and key;
         }
+
         y.ssg_dir[slot] = dir;
         y.ssg_inv_out[slot] = y.ssg_inv[slot];
-        y.ssg_inv[slot] = key and (dir != (ssg & 0x0c == 0x0c));
+        y.ssg_inv[slot] = key and (dir != (seg.on and ssg & ssg_attack != 0));
+        return seg;
+    }
 
-        const retrigger = key and restart;
-        if (reset_phase) y.phase[slot] = 0;
+    fn envelopeStep(y: *Ym2612, slot: usize, tick: bool) void {
+        const key = y.key[slot];
+        const seg = y.ssgSegment(slot);
+        const ssg_on = seg.on;
+
+        const retrigger = key and seg.restart;
+        if (seg.reset_phase) y.phase[slot] = 0;
 
         const state = y.state[slot];
         const base: u6 = if (retrigger) y.ar[slot] else switch (state) {
@@ -693,7 +719,7 @@ pub const Ym2612 = struct {
         }
         if (!key) y.state[slot] = .release;
 
-        if (!retrigger and !hold_up and state != .attack and envelopeOff(level, ssg_on)) {
+        if (!retrigger and !seg.hold_up and state != .attack and envelopeOff(level, ssg_on)) {
             y.state[slot] = .release;
             next = max_atten;
         }

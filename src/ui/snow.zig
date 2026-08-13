@@ -7,7 +7,7 @@
 const std = @import("std");
 
 /// Deliberately tiny — snow has no detail to lose, and this is what keeps an
-//  idle window off the CPU.
+/// idle window off the CPU.
 pub const width = 160;
 pub const height = 120;
 

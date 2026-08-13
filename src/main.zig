@@ -633,10 +633,12 @@ fn windowed(
             .reset => if (rom.*) |image| {
                 if (path) |p| flushSram(io, g, p) catch |err| ui.status("cannot save SRAM: {t}", .{err});
                 startMachine(g, c, image, cfg.*, opts);
-                if (path) |p| loadSram(io, g, p);
-                // A reset is how a region change takes effect, so the card's
-                // NTSC/PAL line can be stale by now.
-                if (path) |p| describeRom(&ui, g, image, p);
+                if (path) |p| {
+                    loadSram(io, g, p);
+                    // A reset is how a region change takes effect, so the
+                    // card's NTSC/PAL line can be stale by now.
+                    describeRom(&ui, g, image, p);
+                }
             },
             .load => |p| {
                 const image = readRom(io, gpa, p) catch |err| {

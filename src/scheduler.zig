@@ -36,14 +36,7 @@ pub fn runFrame(g: *Genesis, c: *Cpu) void {
         const active = g.v.activeHeight();
         runZ80Line(g);
 
-        // The H-int counter reloads throughout blanking and counts down
-        // once per line over the active display.
-        if (g.line > active) {
-            g.v.hint_counter = g.v.hintReload();
-        } else if (g.v.hint_counter == 0) {
-            g.v.hint_counter = g.v.hintReload();
-            g.v.hint_irq = true;
-        } else g.v.hint_counter -= 1;
+        g.v.hintLine(g.line);
 
         g.mclk_debt += mclk_per_line;
         const budget = g.mclk_debt / mclk_per_cpu -| g.cpu_over;
