@@ -28,6 +28,7 @@ pub const Config = struct {
     scale: u8 = 3,
     fullscreen: bool = false,
     region: Region = .auto,
+    scanlines: bool = false,
     audio: bool = true,
     volume: u8 = 100,
     pads: [2]PadType = @splat(.three),
@@ -52,6 +53,8 @@ pub const Config = struct {
                 cfg.fullscreen = parseBool(val) orelse cfg.fullscreen;
             } else if (std.mem.eql(u8, key, "region")) {
                 cfg.region = std.meta.stringToEnum(Region, val) orelse cfg.region;
+            } else if (std.mem.eql(u8, key, "scanlines")) {
+                cfg.scanlines = parseBool(val) orelse cfg.scanlines;
             } else if (std.mem.eql(u8, key, "audio")) {
                 cfg.audio = parseBool(val) orelse cfg.audio;
             } else if (std.mem.eql(u8, key, "volume")) {
@@ -74,6 +77,7 @@ pub const Config = struct {
         try w.print("scale = {d}\n", .{cfg.scale});
         try w.print("fullscreen = {}\n", .{cfg.fullscreen});
         try w.print("region = {s}\n", .{@tagName(cfg.region)});
+        try w.print("scanlines = {}\n", .{cfg.scanlines});
         try w.print("audio = {}\n", .{cfg.audio});
         try w.print("volume = {d}\n", .{cfg.volume});
         try w.print("pad1 = {s}\npad2 = {s}\n", .{ @tagName(cfg.pads[0]), @tagName(cfg.pads[1]) });
@@ -96,7 +100,7 @@ fn parseBool(val: []const u8) ?bool {
 }
 
 test "a written config parses back identical" {
-    var cfg = Config{ .scale = 2, .fullscreen = true, .region = .pal, .audio = false, .volume = 42, .pads = .{ .six, .three } };
+    var cfg = Config{ .scale = 2, .fullscreen = true, .region = .pal, .scanlines = true, .audio = false, .volume = 42, .pads = .{ .six, .three } };
     cfg.keys[@intFromEnum(input.Action.start)] = 'Q';
     cfg.keys[@intFromEnum(input.Action.menu)] = 348; // unnamed: goes out as a number
 

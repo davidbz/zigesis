@@ -1045,6 +1045,17 @@ of §5.2, lit while it is held; frame advance (F8) pauses and runs exactly one
 frame, repeating while held; screenshot (F12) writes the cropped picture
 beside the ROM numbered by frame. Each is one `input.Action` with a default
 binding, one branch in `shell.hotkeys`, and a few lines in the frame loop.
+
+The scanline overlay (Space, and an option that persists) is the fourth, and
+it is alpha stripes rather than a shader: one dark rectangle per *source* line
+over the glass, drawn after the picture and under the menu, so the snow gets
+them too. It draws nothing once a source line is under two device pixels tall
+— at 1x, and in the 480-line interlace, there is no gap between lines to
+darken and dimming every other one would halve the picture instead. The bar
+carries a three-stripe mark of its own, lit while it is on; three hints and a
+title do not fit beside each other until the window is large, so this one
+sheds its key name and keeps the mark rather than dropping off the bar, and
+the toggle says which key it was on the status line.
 Fast-forward skips `paceToAudio` and drains the mixer inside the run loop
 instead of after it — the ring is fixed-size and drops frames rather than
 overflowing, so a burst has to go out to the device as it is made.

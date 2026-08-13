@@ -769,10 +769,12 @@ fn windowed(
         if (rom.* != null) {
             rl.UpdateTexture(tex, &g.v.fb);
             drawPicture(tex, @floatFromInt(g.v.frameWidth()), @floatFromInt(g.v.frameHeight()));
+            if (cfg.scanlines) shell.drawScanlines(@floatFromInt(g.v.frameHeight()));
         } else {
             flakes.step(&snow_px);
             rl.UpdateTexture(snow_tex, &snow_px);
             drawPicture(snow_tex, snow.width, snow.height);
+            if (cfg.scanlines) shell.drawScanlines(snow.height);
             shell.drawIdlePrompt();
         }
         shell.draw(&ui, cfg);

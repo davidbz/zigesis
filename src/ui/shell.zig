@@ -67,6 +67,7 @@ const Act = union(enum) {
     scale,
     fullscreen,
     region,
+    scanlines,
     audio_on,
     volume,
     /// Which pad is in a port, by port index.
@@ -127,6 +128,7 @@ const video_items = [_]Item{
     .{ .label = "Window scale", .act = .scale },
     .{ .label = "Fullscreen", .act = .fullscreen },
     .{ .label = "Region", .act = .region },
+    .{ .label = "Scanlines", .act = .scanlines },
     .{ .label = "Back", .act = .back },
 };
 
@@ -261,6 +263,14 @@ fn hotkeys(ui: *Ui, cfg: *Config, has_rom: bool) Request {
         ui.dirty = true;
         return .none;
     }
+    if (pressed(cfg, .scanlines)) {
+        cfg.scanlines = !cfg.scanlines;
+        ui.dirty = true;
+        // The bar's mark is lit or not; the key it takes is only on the bar
+        // when there is room for it, so the toggle says so itself.
+        ui.status("scanlines {s}", .{if (cfg.scanlines) "on" else "off"});
+        return .none;
+    }
     // Advancing a frame means being stopped between frames, so this pauses
     // rather than only working once something else did.
     if (stepped(cfg, .frame_advance)) {
@@ -362,6 +372,7 @@ fn adjust(ui: *Ui, cfg: *Config, act: Act, delta: i32, has_rom: bool) Request {
     switch (act) {
         .scale => cfg.scale = step(cfg.scale, delta, config.min_scale, config.max_scale),
         .fullscreen => cfg.fullscreen = !cfg.fullscreen,
+        .scanlines => cfg.scanlines = !cfg.scanlines,
         .audio_on => cfg.audio = !cfg.audio,
         .pad => |n| cfg.pads[n] = if (cfg.pads[n] == .six) .three else .six,
         .volume => cfg.volume = step(cfg.volume, delta * volume_step, 0, 100),
@@ -737,6 +748,7 @@ fn valueText(act: Act, cfg: *const Config, ui: *const Ui, buf: []u8) ?[:0]const 
     return switch (act) {
         .scale => std.fmt.bufPrintZ(buf, "{d}x", .{cfg.scale}) catch null,
         .fullscreen => if (cfg.fullscreen) "on" else "off",
+        .scanlines => if (cfg.scanlines) "on" else "off",
         .region => switch (cfg.region) {
             .auto => "auto",
             .ntsc => "NTSC",
@@ -911,6 +923,16 @@ fn drawBar(ui: *const Ui, cfg: *const Config) void {
     var key: [key_hint_buf]u8 = undefined;
     const fast_key = keyHint(cfg, .fast_forward, &key);
     right = barHint(right, floor, ty, fs, .fast, fast_key, if (ui.fast) hilite else dim);
+    var crt_key: [key_hint_buf]u8 = undefined;
+    const crt = keyHint(cfg, .scanlines, &crt_key);
+    const crt_ink = if (cfg.scanlines) hilite else dim;
+    // Three hints and a name do not fit until the window is large, and this
+    // one is a toggle: the mark alone still says whether it is on, so it
+    // sheds its key rather than dropping off the bar.
+    right = if (right - hintWidth(fs, crt) >= floor)
+        barHint(right, floor, ty, fs, .crt, crt, crt_ink)
+    else
+        barIcon(right, ty, fs, .crt, crt_ink);
 
     const name: [:0]const u8 = if (ui.card_n == 0) "NO CARTRIDGE" else std.mem.sliceTo(&ui.card_title, 0);
     drawName(name, name_x, right - name_x, ty, fs, if (ui.card_n == 0) dim else marquee_ink);
@@ -984,11 +1006,15 @@ fn barField(x: c_int, y: c_int, fs: c_int, text: [:0]const u8, field: [:0]const 
 /// so at 1x, where there is not room for both, one that reaches `floor` stays
 /// off rather than crowding the name out.
 fn barHint(x: c_int, floor: c_int, y: c_int, fs: c_int, icon: Icon, text: [:0]const u8, color: rl.Color) c_int {
-    const width = fs + half(fs) + rl.MeasureText(text.ptr, fs);
+    const width = hintWidth(fs, text);
     if (x - width < floor) return x;
     rl.DrawText(text.ptr, x - rl.MeasureText(text.ptr, fs), y, fs, color);
     drawIcon(x - width, y, fs, icon, color);
     return x - width - fs;
+}
+
+fn hintWidth(fs: c_int, text: [:0]const u8) c_int {
+    return fs + half(fs) + rl.MeasureText(text.ptr, fs);
 }
 
 /// One icon on its own, right-aligned like `barText`.
@@ -997,7 +1023,7 @@ fn barIcon(x: c_int, y: c_int, fs: c_int, icon: Icon, color: rl.Color) c_int {
     return x - fs - fs;
 }
 
-const Icon = enum { fast, disk, pause, mute };
+const Icon = enum { fast, disk, pause, mute, crt };
 
 /// The bar says more than it has room for in words, and the default font has
 /// no glyph for any of these, so they are primitives: two chevrons for
@@ -1039,6 +1065,35 @@ fn drawIcon(x: c_int, y: c_int, fs: c_int, icon: Icon, color: rl.Color) void {
             rl.DrawTriangle(v2(ix + s, iy), v2(ix + q, iy + half(s)), v2(ix + s, iy + s), color);
             rl.DrawLineEx(v2(ix, iy + s), v2(ix + s, iy), @floatFromInt(@max(1, @divTrunc(s, 5))), bar_bottom);
         },
+        // The mark for scanlines is scanlines: three stripes with the gaps
+        // between them, which is the overlay itself at icon size. A screen
+        // drawn around them would be two more strokes and nothing gained.
+        .crt => {
+            const t = @max(1, @divTrunc(s, 5));
+            for (0..3) |i| {
+                rl.DrawRectangle(ix, iy + @as(c_int, @intCast(i)) * t * 2, s, t, color);
+            }
+        },
+    }
+}
+
+/// The colour of a scanline: black, and light enough that a dark scene keeps
+/// its shadow detail. Alpha stripes, not a shader (§5.1).
+const scanline_ink = rl.Color{ .r = 0, .g = 0, .b = 0, .a = 90 };
+
+/// One dark stripe per source line over the glass, which is what a tube's gap
+/// between lines looks like. Drawn only while a source line is at least two
+/// device pixels tall: below that there is no gap to darken, and dimming every
+/// other line halves the picture rather than looking like a CRT.
+pub fn drawScanlines(lines: f32) void {
+    const glass: f32 = @floatFromInt(rl.GetScreenHeight() - barHeight());
+    const row = glass / lines;
+    if (row < 2) return;
+    const thick = @max(1, @round(row / 3));
+    const w: f32 = @floatFromInt(rl.GetScreenWidth());
+    var i: f32 = 1;
+    while (i <= lines) : (i += 1) {
+        rl.DrawRectangleRec(.{ .x = 0, .y = i * row - thick, .width = w, .height = thick }, scanline_ink);
     }
 }
 

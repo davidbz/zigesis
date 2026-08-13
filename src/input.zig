@@ -51,6 +51,7 @@ pub const Action = enum {
     fast_forward,
     frame_advance,
     screenshot,
+    scanlines,
 
     pub const count = @typeInfo(Action).@"enum".fields.len;
     /// Buttons on one pad; actions past `pads * pad_count` are hotkeys.
@@ -102,6 +103,7 @@ pub const Action = enum {
             .fast_forward => "Fast Forward",
             .frame_advance => "Frame Advance",
             .screenshot => "Screenshot",
+            .scanlines => "Scanlines",
         };
     }
 };
@@ -141,6 +143,7 @@ pub const defaults: Bindings = blk: {
     b[@intFromEnum(Action.fast_forward)] = key_tab;
     b[@intFromEnum(Action.frame_advance)] = key_f8;
     b[@intFromEnum(Action.screenshot)] = key_f12;
+    b[@intFromEnum(Action.scanlines)] = ' ';
     break :blk b;
 };
 
