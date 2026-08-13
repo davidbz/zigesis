@@ -242,6 +242,24 @@ pub const Vdp = struct {
     pub fn hintReload(v: *const Vdp) u8 {
         return v.regs[10];
     }
+
+    /// The H-int counter, advanced once per line before that line runs. It
+    /// counts down over the active display and the first blanked line, and is
+    /// reloaded on every line after that — which is why a raster split starts
+    /// from the register's value at the top of every frame rather than from
+    /// wherever the last one left it.
+    pub fn hintLine(v: *Vdp, line: u32) void {
+        if (line > v.activeHeight()) {
+            v.hint_counter = v.hintReload();
+            return;
+        }
+        if (v.hint_counter != 0) {
+            v.hint_counter -= 1;
+            return;
+        }
+        v.hint_counter = v.hintReload();
+        v.hint_irq = true;
+    }
     fn dmaEnabled(v: *const Vdp) bool {
         return v.regs[1] & 0x10 != 0;
     }
@@ -1122,6 +1140,36 @@ test "the picture's size is a mode, not a constant" {
     v.pal = true;
     try testing.expectEqual(@as(u32, 313), v.linesPerFrame());
     try testing.expect(v.readStatus(0) & st_pal != 0);
+}
+
+test "the H-int counter fires across the active display and reloads through blanking" {
+    // A reload of 0 is an interrupt every line, which is what pins the last
+    // line that counts down: the first blanked one, not the last active one.
+    for ([_]u8{ 0, 1, 2 }) |reload| {
+        var v = testVdp();
+        v.regs[10] = reload;
+
+        var fired: u32 = 0;
+        var last: ?u32 = null;
+        for (0..v.linesPerFrame()) |line| {
+            v.hint_irq = false;
+            v.hintLine(@intCast(line));
+            if (v.hint_irq) {
+                fired += 1;
+                last = @intCast(line);
+            }
+        }
+
+        // Lines 0 through `activeHeight` — the whole display plus the first
+        // blanked line — count down; the rest of the frame only reloads.
+        const counted = v.activeHeight() + 1;
+        const period = @as(u32, reload) + 1;
+        try testing.expectEqual((counted + period - 1) / period, fired);
+        try testing.expectEqual((counted - 1) / period * period, last.?);
+        // Blanking leaves the counter loaded, so the next frame's first split
+        // lands on line 0 however the last one ended.
+        try testing.expectEqual(reload, v.hint_counter);
+    }
 }
 
 /// Fills a sprite table at $8000 with `n` 8x8 sprites of tile 1, all on line

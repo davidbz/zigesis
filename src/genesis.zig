@@ -652,20 +652,30 @@ test "a Japan-only cartridge gets a domestic machine on the version register" {
 }
 
 test "the header's region field, in both encodings, picks the machine" {
-    var rom: [0x200]u8 = @splat(0);
-    const field = rom[region_field..][0..region_field_len];
+    // Field, then the machine it asks for. Only a cart that lists one region
+    // gets that region's machine; anything multi-region gets export NTSC.
+    const cases = .{
+        .{ "J   ", true, false },
+        .{ "1   ", true, false }, // hex digit: Japan only
+        .{ "U   ", false, false },
+        .{ "E   ", false, true }, // a letter, not the hex digit 14
+        .{ "8   ", false, true }, // overseas PAL only
+        .{ "JU  ", false, false }, // Japan and overseas NTSC
+        .{ "9   ", false, false }, // Japan and overseas PAL
+        .{ "JUE ", false, false },
+        .{ "F   ", false, false }, // every region: NTSC wins
+    };
 
-    @memcpy(field, "1   "); // hex digit: Japan only
-    try testing.expect(romIsDomestic(&rom));
-    try testing.expect(!romIsPal(&rom));
-    @memcpy(field, "J   ");
-    try testing.expect(romIsDomestic(&rom));
-    @memcpy(field, "JU  "); // Japan and overseas NTSC
-    try testing.expect(!romIsDomestic(&rom));
-    @memcpy(field, "9   "); // Japan and overseas PAL
-    try testing.expect(!romIsDomestic(&rom));
-    try testing.expect(!romIsPal(&rom));
-    try testing.expect(!romIsDomestic(rom[0..16])); // too short to have a header
+    var rom: [0x200]u8 = @splat(0);
+    inline for (cases) |c| {
+        @memcpy(rom[region_field..][0..region_field_len], c[0]);
+        try testing.expectEqual(c[1], romIsDomestic(&rom));
+        try testing.expectEqual(c[2], romIsPal(&rom));
+    }
+
+    const too_short = rom[0..16];
+    try testing.expect(!romIsDomestic(too_short));
+    try testing.expect(!romIsPal(too_short));
 }
 
 test "ioWrite roundtrips pad_data and pad_ctrl" {
@@ -833,21 +843,4 @@ test "TMSS writes are accepted and dropped" {
     g.write16(0xA1_4002, 0x4741); // "GA"
     g.write16(0xA1_4100, 0x0001); // the VDP lock this machine does not have
     try testing.expectEqual(@as(u8, 0xFF), g.read8(0xA1_4000));
-}
-
-test "the header's region field picks a machine, in both of its encodings" {
-    var rom: [0x200]u8 = @splat(0);
-    const field = rom[region_field..][0..region_field_len];
-
-    @memcpy(field, "JUE ");
-    try testing.expect(!romIsPal(&rom));
-    @memcpy(field, "E   ");
-    try testing.expect(romIsPal(&rom)); // a letter, not the hex digit 14
-    @memcpy(field, "U   ");
-    try testing.expect(!romIsPal(&rom));
-    @memcpy(field, "8   "); // overseas PAL only
-    try testing.expect(romIsPal(&rom));
-    @memcpy(field, "F   "); // every region: NTSC wins
-    try testing.expect(!romIsPal(&rom));
-    try testing.expect(!romIsPal(rom[0..16])); // too short to have a header
 }
