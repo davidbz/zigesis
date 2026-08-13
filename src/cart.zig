@@ -212,6 +212,40 @@ fn checksumOf(rom: []const u8) u16 {
     return sum;
 }
 
+/// Super Magic Drive dumps (`.smd`) are not plain images: a 512-byte copier
+/// header, then 16 KiB blocks in which all the odd bytes come first and all
+/// the even bytes after. Fed to the machine as-is, the reset vector is noise
+/// and the 68000 goes nowhere.
+const smd_header = 0x200;
+const smd_block = 16 << 10;
+const smd_magic_at = 8;
+const smd_magic = "\xAA\xBB\x06";
+
+pub fn interleaved(image: []const u8) bool {
+    if (image.len < smd_header + smd_block) return false;
+    if ((image.len - smd_header) % smd_block != 0) return false;
+    return std.mem.eql(u8, image[smd_magic_at..][0..smd_magic.len], smd_magic);
+}
+
+/// Unscrambles `image` in place and returns the plain ROM's length: the copier
+/// header goes, and each block's two halves are woven back together.
+pub fn deinterleave(image: []u8) usize {
+    const body = image[smd_header..];
+    var block: [smd_block]u8 = undefined;
+    const half = smd_block / 2;
+    var at: usize = 0;
+    while (at < body.len) : (at += smd_block) {
+        const dst = body[at..][0..smd_block];
+        @memcpy(&block, dst);
+        for (block[0..half], block[half..], 0..) |odd, even, i| {
+            dst[i * 2] = even;
+            dst[i * 2 + 1] = odd;
+        }
+    }
+    std.mem.copyForwards(u8, image[0..body.len], body);
+    return body.len;
+}
+
 // ------------------------------------------------------------------- tests
 
 const testing = std.testing;
@@ -337,4 +371,32 @@ test "the $A130F3 mapper swaps 512 KiB pages under the top seven slots" {
     c.writeTime(0xA1_30F3, 200);
     try testing.expectEqual(@as(u8, 0xFF), c.read8(rom, 0x08_0000));
     try testing.expectEqual(@as(u16, 0xFFFF), c.read16(rom, 0x08_0000));
+}
+
+test "an interleaved copier dump is put back the way the machine reads it" {
+    const blocks = 2;
+    var plain: [blocks * smd_block]u8 = undefined;
+    for (&plain, 0..) |*b, i| b.* = @truncate(i *% 7 +% (i >> 8));
+
+    var dump: [smd_header + plain.len]u8 = @splat(0);
+    @memcpy(dump[smd_magic_at..][0..smd_magic.len], smd_magic);
+    const half = smd_block / 2;
+    for (0..blocks) |blk| {
+        const src = plain[blk * smd_block ..][0..smd_block];
+        const dst = dump[smd_header + blk * smd_block ..][0..smd_block];
+        for (0..half) |i| {
+            dst[i] = src[i * 2 + 1];
+            dst[half + i] = src[i * 2];
+        }
+    }
+
+    try testing.expect(interleaved(&dump));
+    try testing.expectEqual(plain.len, deinterleave(&dump));
+    try testing.expectEqualSlices(u8, &plain, dump[0..plain.len]);
+
+    // A plain image is left alone: no magic, and a length that is not a whole
+    // number of blocks past a copier header.
+    try testing.expect(!interleaved(&plain));
+    var headed: [smd_header + smd_block]u8 = @splat(0);
+    try testing.expect(!interleaved(&headed));
 }

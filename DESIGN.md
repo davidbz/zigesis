@@ -732,6 +732,18 @@ raylib's own `LoadDirectoryFiles` filtered to ROM extensions, directories
 first, with a `..` row, reusing the menu's list rendering. Drag-and-drop and
 the CLI argument reach the same `startMachine`.
 
+The browser offers `.smd`, so the loader has to understand it. A Super Magic
+Drive dump is not a plain image: a 512-byte copier header, then 16 KiB blocks
+in which all the odd bytes come first and the even bytes after. Handed to the
+machine as-is the reset vector is noise, so the picture stays black while the
+frontend around it — status bar, frame rate, audio pacing — looks perfectly
+healthy, which is what makes it read as a rendering bug rather than a loading
+one. `cart.interleaved` recognises a dump by its `AA BB 06` magic and its
+length, `cart.deinterleave` weaves it back into a plain image in place, and
+every ROM the frontend reads — CLI, menu, browser — comes through one
+`main.readRom`, so no path can skip it. Multi-file split dumps are not
+handled: the second half is a separate file to go looking for.
+
 **Region** is auto/NTSC/PAL, and `auto` reads the cartridge header's field at
 `$1F0`, which has two encodings in the wild (the letters `JUE` or a single
 hex-digit bitmask; `E` is ambiguous between them and is read as the letter).
