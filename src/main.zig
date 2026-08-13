@@ -200,6 +200,14 @@ fn startMachine(g: *Genesis, c: *Cpu, rom: []const u8, cfg: Config, opts: Opts) 
     Core.reset(c, g);
 }
 
+/// Every ROM the frontend loads comes through here, so a copier dump is a
+/// plain image by the time anything else sees it.
+fn readRom(io: std.Io, gpa: std.mem.Allocator, path: []const u8) ![]u8 {
+    const image = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(max_rom_bytes));
+    if (!cart.interleaved(image)) return image;
+    return gpa.realloc(image, cart.deinterleave(image));
+}
+
 /// Save states and backup RAM live beside the ROM, with an extension *added*
 /// rather than replaced: `sonic.bin.srm`, `sonic.bin.st0`. Two ROMs of the
 /// same name in different formats then never share a file.
@@ -401,7 +409,7 @@ pub fn main(init: std.process.Init) !void {
     var rom: ?[]u8 = null;
     defer if (rom) |r| gpa.free(r);
     if (path) |p| {
-        rom = std.Io.Dir.cwd().readFileAlloc(io, p, gpa, .limited(max_rom_bytes)) catch |err| {
+        rom = readRom(io, gpa, p) catch |err| {
             std.debug.print("cannot read {s}: {t}\n", .{ p, err });
             return err;
         };
@@ -624,7 +632,7 @@ fn windowed(
                 if (path) |p| describeRom(&ui, g, image, p);
             },
             .load => |p| {
-                const image = std.Io.Dir.cwd().readFileAlloc(io, p, gpa, .limited(max_rom_bytes)) catch |err| {
+                const image = readRom(io, gpa, p) catch |err| {
                     ui.status("cannot load {s}: {t}", .{ p, err });
                     continue;
                 };
