@@ -36,6 +36,7 @@ pub const Request = union(enum) {
     quit,
     save_state: u8,
     load_state: u8,
+    screenshot,
 };
 
 const Page = enum {
@@ -148,6 +149,11 @@ pub const max_card_title = 48;
 pub const Ui = struct {
     open: bool = false,
     paused: bool = false,
+    /// The fast-forward key is held: `main.zig` runs several frames per drawn
+    /// one. Held rather than toggled, so letting go is always the way back.
+    fast: bool = false,
+    /// One frame owed to the frame-advance key, cleared once it is run.
+    step: bool = false,
     page: Page = .root,
     sel: usize = 0,
     /// Set when the menu changes an option, cleared by `main.zig` once the
@@ -212,6 +218,7 @@ pub const Ui = struct {
 // ---------------------------------------------------------------- update
 
 pub fn update(ui: *Ui, cfg: *Config, has_rom: bool) Request {
+    ui.fast = false; // only `hotkeys` turns it back on, so the menu cancels it
     if (rl.IsFileDropped()) {
         const dropped = rl.LoadDroppedFiles();
         defer rl.UnloadDroppedFiles(dropped);
@@ -226,6 +233,7 @@ pub fn update(ui: *Ui, cfg: *Config, has_rom: bool) Request {
 }
 
 fn hotkeys(ui: *Ui, cfg: *Config, has_rom: bool) Request {
+    ui.fast = down(cfg, .fast_forward);
     if (pressed(cfg, .menu)) {
         ui.open = true;
         ui.goto(.root);
@@ -246,6 +254,14 @@ fn hotkeys(ui: *Ui, cfg: *Config, has_rom: bool) Request {
         ui.dirty = true;
         return .none;
     }
+    // Advancing a frame means being stopped between frames, so this pauses
+    // rather than only working once something else did.
+    if (stepped(cfg, .frame_advance)) {
+        ui.paused = true;
+        ui.step = true;
+        return .none;
+    }
+    if (has_rom and pressed(cfg, .screenshot)) return .screenshot;
     if (pressed(cfg, .reset)) return .reset;
     if (pressed(cfg, .next_slot)) {
         ui.slot = (ui.slot + 1) % slots;
@@ -365,6 +381,18 @@ fn step(cur: u8, delta: i32, lo: u8, hi: u8) u8 {
 fn pressed(cfg: *const Config, action: Action) bool {
     const key = cfg.keys[@intFromEnum(action)];
     return key != 0 and rl.IsKeyPressed(@intCast(key));
+}
+
+fn down(cfg: *const Config, action: Action) bool {
+    const key = cfg.keys[@intFromEnum(action)];
+    return key != 0 and rl.IsKeyDown(@intCast(key));
+}
+
+/// Like `pressed`, but a held key keeps firing — for the frame-advance, where
+/// holding the key should walk frames the way it walks a menu.
+fn stepped(cfg: *const Config, action: Action) bool {
+    const key = cfg.keys[@intFromEnum(action)];
+    return key != 0 and repeat(@intCast(key));
 }
 
 /// Held arrows should walk a list, which is what a menu wants and what
@@ -793,6 +821,8 @@ fn drawBar(ui: *const Ui, cfg: *const Config) void {
     var right = w - gap;
     if (ui.paused) {
         right = barText(right, ty, fs, "PAUSED", hilite);
+    } else if (ui.fast) {
+        right = barText(right, ty, fs, "FAST", hilite);
     } else if (std.fmt.bufPrintZ(&buf, "{d} FPS", .{rl.GetFPS()})) |fps| {
         right = barText(right, ty, fs, fps, dim);
     } else |_| {}
@@ -926,9 +956,9 @@ test "a slot says whether it holds anything, and how old it is" {
 
 test "the cartridge card holds what fits and cuts the rest" {
     var ui = Ui{};
-    cardStart(&ui, "SONIC THE HEDGEHOG", "(C)SEGA 1991.APR");
-    try std.testing.expectEqualStrings("SONIC THE HEDGEHOG", std.mem.sliceTo(&ui.card_title, 0));
-    try std.testing.expectEqualStrings("(C)SEGA 1991.APR", std.mem.sliceTo(&ui.card_sub, 0));
+    cardStart(&ui, "SUPER TEST GAME", "(C)NOBODY 1991.APR");
+    try std.testing.expectEqualStrings("SUPER TEST GAME", std.mem.sliceTo(&ui.card_title, 0));
+    try std.testing.expectEqualStrings("(C)NOBODY 1991.APR", std.mem.sliceTo(&ui.card_sub, 0));
 
     cardRow(&ui, "SERIAL", .plain, "{s}", .{"GM 00001009-00"});
     try std.testing.expectEqual(@as(usize, 1), ui.card_n);

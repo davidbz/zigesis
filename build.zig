@@ -256,6 +256,29 @@ pub fn build(b: *std.Build) void {
     b.step("vdpfifo", "Walk VDPFIFOTesting and print its scoreboard (needs roms/)")
         .dependOn(&vdpfifo_run.step);
 
+    // --- compatibility sweep ---------------------------------------------------
+    const compat = b.addExecutable(.{
+        .name = "compat",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/compat.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "audio", .module = audio },
+                .{ .name = "cart", .module = cart },
+                .{ .name = "genesis", .module = genesis },
+                .{ .name = "scheduler", .module = scheduler },
+                .{ .name = "vdp", .module = vdp },
+            },
+        }),
+    });
+    check_step.dependOn(&compat.step);
+    const compat_run = b.addRunArtifact(compat);
+    compat_run.setCwd(b.path(".")); // roms/ is resolved relative to the project
+    if (b.args) |args| compat_run.addArgs(args);
+    b.step("compat", "Boot every ROM in a directory headless and report what it did")
+        .dependOn(&compat_run.step);
+
     // --- the emulator ----------------------------------------------------------
     // raylib is a lazy dependency, but zigesis always needs it: the call below
     // still runs on every build after a fresh clone, a build script cannot

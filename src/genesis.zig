@@ -141,25 +141,53 @@ const dma_bank_mask: u32 = 0x1_FFFF;
 const region_field = 0x1F0;
 const region_field_len = 4;
 
-/// Whether a cartridge wants a PAL machine, for the frontend's `auto` region.
-/// The field is written two ways: the old one lists the regions it runs in as
-/// letters (`JUE`, `E`), the newer one packs them into one hex digit — bit 0
-/// Japan, bit 2 overseas NTSC, bit 3 overseas PAL. Either way, PAL means
-/// Europe and nothing else, because a cart that also runs on an American
-/// machine should run at the speed it was written for.
-pub fn romIsPal(rom: []const u8) bool {
-    if (rom.len < region_field + region_field_len) return false;
+/// The regions a cartridge says it runs in, one bit each. The header field is
+/// written two ways: the old one lists them as letters (`JUE`, `E`), the newer
+/// one packs them into one hex digit — bit 0 Japan, bit 2 overseas NTSC, bit 3
+/// overseas PAL.
+const region_japan: u3 = 0b001;
+const region_ntsc: u3 = 0b010;
+const region_pal: u3 = 0b100;
+
+fn romRegions(rom: []const u8) u3 {
+    if (rom.len < region_field + region_field_len) return 0;
     const field = std.mem.trim(u8, rom[region_field..][0..region_field_len], " \x00");
-    if (field.len == 0) return false;
+    if (field.len == 0) return 0;
     // 'E' is both a region letter and a hex digit, so the letter form has to
     // win whenever the whole field reads as letters.
     for (field) |ch| {
         if (std.mem.indexOfScalar(u8, "JUE", ch) == null) break;
-    } else return std.mem.indexOfScalar(u8, field, 'E') != null and
-        std.mem.indexOfAny(u8, field, "UJ") == null;
+    } else {
+        var out: u3 = 0;
+        for (field) |ch| out |= switch (ch) {
+            'J' => region_japan,
+            'U' => region_ntsc,
+            else => region_pal,
+        };
+        return out;
+    }
 
-    const bits = std.fmt.charToDigit(field[0], 16) catch return false;
-    return bits & 0b1000 != 0 and bits & 0b0101 == 0;
+    const bits = std.fmt.charToDigit(field[0], 16) catch return 0;
+    return @as(u3, @intFromBool(bits & 0b0001 != 0)) |
+        @as(u3, @intFromBool(bits & 0b0100 != 0)) << 1 |
+        @as(u3, @intFromBool(bits & 0b1000 != 0)) << 2;
+}
+
+/// Whether a cartridge wants a PAL machine, for the frontend's `auto` region.
+/// PAL means Europe and nothing else, because a cart that also runs on an
+/// American machine should run at the speed it was written for.
+pub fn romIsPal(rom: []const u8) bool {
+    return romRegions(rom) == region_pal;
+}
+
+/// Whether a cartridge wants a Japanese machine, which is the other half of
+/// what the region field says and the one $A10001 answers. A Japan-only cart
+/// on a machine that reports itself as export hits the ROM's own lockout
+/// screen — the game boots, draws "this cartridge is for another system", and
+/// stops, which looks exactly like a hang that isn't one. Same rule as the PAL
+/// side: a cart that also runs overseas gets the export machine it lists.
+pub fn romIsDomestic(rom: []const u8) bool {
+    return romRegions(rom) == region_japan;
 }
 
 // Controller bits, active high here and inverted on the way out to the ROM.
@@ -180,6 +208,10 @@ pub const Genesis = struct {
     /// What the slot adds to those ROM bytes: backup RAM and the banking
     /// mapper, both of which answer inside the cartridge's address window.
     cart: Cart = .{},
+    /// Which machine $A10001 says this is. Read off the cartridge rather than
+    /// chosen in the options: unlike the video standard, a game's region check
+    /// is asking about the console it is plugged into, not about timing.
+    domestic: bool = false,
     ram: [ram_bytes]u8 = @splat(0),
     zram: [zram_bytes]u8 = @splat(0),
     v: vdp.Vdp = .{},
@@ -247,7 +279,7 @@ pub const Genesis = struct {
     /// A machine with a cartridge in the slot. The header is read once, here:
     /// everything the slot answers with afterwards is in `cart`.
     pub fn init(rom: []const u8, cpu: *Cpu) Genesis {
-        return .{ .rom = rom, .cpu = cpu, .cart = .init(rom) };
+        return .{ .rom = rom, .cpu = cpu, .cart = .init(rom), .domestic = romIsDomestic(rom) };
     }
 
     // ------------------------------------------------------------------ clock
@@ -368,7 +400,8 @@ pub const Genesis = struct {
 
     fn ioRead(g: *Genesis, addr: u24) u8 {
         return switch (addr & io_mask) {
-            io_version => version_export | version_no_expansion |
+            io_version => version_no_expansion |
+                @as(u8, if (g.domestic) 0 else version_export) |
                 @as(u8, if (g.v.pal) version_pal else 0),
             io_data1 => padByte(g.buttons, g.pad_ctrl, g.pad_data),
             io_data2 => padByte(g.buttons2, g.pad2_ctrl, g.pad2_data),
@@ -599,6 +632,40 @@ test "version register reports export, NTSC, no expansion" {
     var g = Genesis{ .rom = &.{}, .cpu = &c };
 
     try testing.expectEqual(@as(u8, 0xA0), g.read8(0xA10001));
+}
+
+test "a Japan-only cartridge gets a domestic machine on the version register" {
+    var c = Cpu{};
+    var rom: [0x200]u8 = @splat(0);
+    @memcpy(rom[region_field..][0..region_field_len], "J   ");
+    var g = Genesis.init(&rom, &c);
+
+    try testing.expect(g.domestic);
+    try testing.expectEqual(@as(u8, 0x20), g.read8(0xA10001)); // export bit clear
+
+    // A cart that also runs overseas is happy on the export machine, so it
+    // gets one — the same rule the PAL side uses.
+    @memcpy(rom[region_field..][0..region_field_len], "JUE ");
+    g = Genesis.init(&rom, &c);
+    try testing.expect(!g.domestic);
+    try testing.expectEqual(@as(u8, 0xA0), g.read8(0xA10001));
+}
+
+test "the header's region field, in both encodings, picks the machine" {
+    var rom: [0x200]u8 = @splat(0);
+    const field = rom[region_field..][0..region_field_len];
+
+    @memcpy(field, "1   "); // hex digit: Japan only
+    try testing.expect(romIsDomestic(&rom));
+    try testing.expect(!romIsPal(&rom));
+    @memcpy(field, "J   ");
+    try testing.expect(romIsDomestic(&rom));
+    @memcpy(field, "JU  "); // Japan and overseas NTSC
+    try testing.expect(!romIsDomestic(&rom));
+    @memcpy(field, "9   "); // Japan and overseas PAL
+    try testing.expect(!romIsDomestic(&rom));
+    try testing.expect(!romIsPal(&rom));
+    try testing.expect(!romIsDomestic(rom[0..16])); // too short to have a header
 }
 
 test "ioWrite roundtrips pad_data and pad_ctrl" {

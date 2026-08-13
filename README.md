@@ -9,6 +9,22 @@ small desktop frontend. Full scope, architecture, and engineering standards
 are documented in [`DESIGN.md`](DESIGN.md); this file covers what a
 contributor or user needs to build, test, and run it.
 
+No screenshots are checked in: every picture this emulator can draw comes out
+of somebody else's game, so `tools/fetch_test_roms.sh` and then
+`zig build run -- roms/doukutsu-en.gen shot.png --shot 1500` makes your own.
+
+## Features
+
+| Area | What works | Not there |
+|------|-----------|-----------|
+| CPU | 68000 via [z68k](https://github.com/davidbz/z68k) (SingleStepTests-conformant), Z80 with the full SingleStepTests corpus green, bus arbitration and BUSREQ/RESET | — |
+| Video | H32/H40, V28/V30, both scroll planes, window, per-line and per-column scroll, shadow/highlight, interlace, sprites with per-line limits, DMA and the FIFO, H/V interrupts, H counter | one sprite-masking edge case, sprite prefetch a line ahead (DESIGN.md §9 M4) |
+| Audio | YM2612 (diffed against Nuked-OPN2), SN76489 PSG, the analogue ladder effect, mixing and resampling to 44.1 kHz, per-channel mute | — |
+| Cartridges | raw and `.smd` copier dumps, header parsing, backup RAM to `.srm`, the `$A130F3` mapper, TMSS writes | SSF2's mapper, lock-on carts, EEPROM saves, unlicensed protection chips |
+| Machine | NTSC and PAL timing from the header or the options, both controller ports, region reported to the game from the cartridge | 6-button pad, Mega CD, 32X |
+| Frontend | menu, file browser, drag-and-drop, key rebinding, save states in 8 slots plus a quicksave, pause, fast-forward, frame advance, screenshots, fullscreen | shaders and scanline filters, gamepad input |
+| Determinism | headless `--shot`/`--hash`, input record and replay, pinned frame and audio hashes | — |
+
 ## Requirements
 
 - [Zig](https://ziglang.org/) 0.16.0 (see `build.zig.zon`).
@@ -72,7 +88,10 @@ only.
 | F5 | Soft reset |
 | F6 | Quicksave |
 | F7 | Quickload |
+| F8 | Advance one frame (and pause) |
 | F11 | Fullscreen |
+| F12 | Screenshot, next to the ROM |
+| Tab (held) | Fast-forward, 4x |
 
 Every one of those is rebindable from Options → Keys, including a second
 controller, which ships unbound. The menu takes the arrow keys and Enter or
@@ -91,9 +110,11 @@ quick way to spot a bad dump.
 ### Files beside the ROM
 
 Save states and cartridge backup RAM live next to the ROM, with an extension
-added rather than replaced: `sonic.bin.st0` through `.st7` for the eight
-slots, `.st8` for the quicksave, and `sonic.bin.srm` for a game's own saves,
-written on exit and every few seconds while it plays. A save state is only
+added rather than replaced: `game.bin.st0` through `.st7` for the eight
+slots, `.st8` for the quicksave, and `game.bin.srm` for a game's own saves,
+written on exit and every few seconds while it plays. F12 writes its PNG
+there too, numbered by frame (`game.bin.5400.png`), so holding the key never
+overwrites the shot before it. A save state is only
 readable by the build that wrote it — a state from another build is refused,
 not loaded as garbage — so states do not survive recompiling zigesis; `.srm`
 files do.
@@ -152,6 +173,21 @@ distributable open-source homebrew — and checks the framebuffer and the
 resampled sound output against pinned hashes. Fetch the ROM once with
 `tools/fetch_test_roms.sh` (pinned to a release tag, into the gitignored
 `roms/`); the test skips cleanly when it is absent.
+
+### Compatibility sweep
+
+```
+zig build compat -Doptimize=ReleaseFast              # every ROM in roms/
+zig build compat -Doptimize=ReleaseFast -- mydir --frames 1800
+```
+
+Triage, not a gate: it boots every ROM it finds in a directory headless, runs
+each for N frames tapping Start and C, and prints one line per ROM saying
+whether the 68000 halted, whether the picture is blank, how long it has been
+still, and whether either sound chip was ever heard. Those four catch every
+way a game fails to boot, and the still and silent counts say where to point
+a `--shot` next. The list is whatever is in the directory when it runs —
+nothing is committed, fetched, or named in the source.
 
 ### VDP conformance suite
 
@@ -247,6 +283,8 @@ src/
     root.zig          barrel module
 test/
   system_test.zig     headless frame-hash and audio-hash regression suite
+  vdpfifo.zig         VDPFIFOTesting walker: reads the ROM's own report as text
+  compat.zig          compatibility sweep: boot every ROM in a directory, report
   z80_sst_test.zig    SingleStepTests/z80 conformance runner
 tools/
   fetch_test_roms.sh  fetches the free test ROMs (regression suite, VDP conformance) into roms/
