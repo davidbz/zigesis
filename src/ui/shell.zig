@@ -1081,19 +1081,28 @@ fn drawIcon(x: c_int, y: c_int, fs: c_int, icon: Icon, color: rl.Color) void {
 /// its shadow detail. Alpha stripes, not a shader (§5.1).
 const scanline_ink = rl.Color{ .r = 0, .g = 0, .b = 0, .a = 90 };
 
+/// Where the stripes sit: `row` device pixels between them, `thick` of that
+/// dark, and the dark part at the *bottom* of each row, which is the gap a
+/// tube leaves under a line. Null when a source line is under two device
+/// pixels tall — there is no gap to darken then, and dimming every other line
+/// halves the picture rather than looking like a CRT.
+const Stripes = struct { row: f32, thick: f32 };
+
+fn stripes(glass: f32, lines: f32) ?Stripes {
+    const row = glass / lines;
+    if (row < 2) return null;
+    return .{ .row = row, .thick = @max(1, @round(row / 3)) };
+}
+
 /// One dark stripe per source line over the glass, which is what a tube's gap
-/// between lines looks like. Drawn only while a source line is at least two
-/// device pixels tall: below that there is no gap to darken, and dimming every
-/// other line halves the picture rather than looking like a CRT.
+/// between lines looks like.
 pub fn drawScanlines(lines: f32) void {
     const glass: f32 = @floatFromInt(rl.GetScreenHeight() - barHeight());
-    const row = glass / lines;
-    if (row < 2) return;
-    const thick = @max(1, @round(row / 3));
+    const s = stripes(glass, lines) orelse return;
     const w: f32 = @floatFromInt(rl.GetScreenWidth());
     var i: f32 = 1;
     while (i <= lines) : (i += 1) {
-        rl.DrawRectangleRec(.{ .x = 0, .y = i * row - thick, .width = w, .height = thick }, scanline_ink);
+        rl.DrawRectangleRec(.{ .x = 0, .y = i * s.row - s.thick, .width = w, .height = s.thick }, scanline_ink);
     }
 }
 
@@ -1305,6 +1314,53 @@ test "a slot says whether it holds anything, and how old it is" {
     try std.testing.expectEqualStrings("Quick", ui.items()[quick_slot].label);
     try std.testing.expectEqualStrings("2m ago", valueText(ui.items()[quick_slot].act, &cfg, &ui, &buf).?);
     try std.testing.expectEqualStrings("empty", valueText(ui.items()[0].act, &cfg, &ui, &buf).?);
+}
+
+test "scanlines stripe every source line, or stay off the picture entirely" {
+    // A 224-line picture at 1x, and the 480-line interlace in a 3x window:
+    // under two device pixels a row, so there is no gap to draw in.
+    try std.testing.expectEqual(@as(?Stripes, null), stripes(224, 224));
+    try std.testing.expectEqual(@as(?Stripes, null), stripes(672, 480));
+
+    // 3x and 6x, both H40 V28. The dark part is a third of the row, never
+    // thinner than the pixel it has to land on.
+    const three = stripes(672, 224).?;
+    try std.testing.expectEqual(@as(f32, 3), three.row);
+    try std.testing.expectEqual(@as(f32, 1), three.thick);
+    const six = stripes(1344, 224).?;
+    try std.testing.expectEqual(@as(f32, 6), six.row);
+    try std.testing.expectEqual(@as(f32, 2), six.thick);
+
+    // Stripes never touch each other and the last one stops at the bottom of
+    // the glass rather than under the status bar. Fullscreen heights are not
+    // whole multiples of the line count, so this is checked off a ragged one.
+    const glass: f32 = 907;
+    const lines: f32 = 240;
+    const s = stripes(glass, lines).?;
+    try std.testing.expect(s.thick <= s.row);
+    try std.testing.expectApproxEqAbs(glass, lines * s.row, 0.01);
+    try std.testing.expect(lines * s.row - s.thick >= glass - s.row);
+}
+
+test "scanlines are an option, a menu row, and a key" {
+    var ui = Ui{};
+    var cfg = Config{};
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("off", valueText(.scanlines, &cfg, &ui, &buf).?);
+
+    _ = adjust(&ui, &cfg, .scanlines, 1, false);
+    try std.testing.expect(cfg.scanlines);
+    try std.testing.expect(ui.dirty); // and so it survives a restart
+    try std.testing.expectEqualStrings("on", valueText(.scanlines, &cfg, &ui, &buf).?);
+    _ = adjust(&ui, &cfg, .scanlines, -1, false);
+    try std.testing.expect(!cfg.scanlines);
+
+    // The row is on the video page, and the key is bound out of the box: the
+    // bar hangs its mark on that binding.
+    var found = false;
+    for (video_items) |item| found = found or item.act == .scanlines;
+    try std.testing.expect(found);
+    try std.testing.expect(cfg.keys[@intFromEnum(Action.scanlines)] != 0);
 }
 
 test "the cartridge card holds what fits and cuts the rest" {
