@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-zroute is pre-1.0. Only the latest tagged release is supported with security fixes.
+zigesis is pre-1.0. Only the latest tagged release is supported with security fixes.
 
 ## Reporting a Vulnerability
 
