@@ -94,8 +94,8 @@ fn screenHash(v: *const vdp.Vdp) u64 {
     return std.hash.Wyhash.hash(0, v.vram[nt .. nt + rows * plane_cells * 2]);
 }
 
-fn frame(g: *Genesis, c: *Cpu, buttons: u8) void {
-    g.buttons = buttons;
+fn frame(g: *Genesis, c: *Cpu, buttons: u16) void {
+    g.pads[0].buttons = buttons;
     scheduler.runFrame(g, c);
     // The mixer's ring is fixed-size and nothing else drains it here.
     while (g.audio.pop()) |_| {}

@@ -197,7 +197,7 @@ In scope (required):
 Nice to have (only after all required items ship):
 
 - Recent-ROMs list.
-- 6-button controller mode.
+- 6-button controller mode. Done in M8.
 - Per-channel audio muting (useful for debugging, doubles as a feature).
 - Fast-forward and frame-advance hotkeys.
 - Screenshot hotkey (already nearly free given `--shot`).
@@ -239,13 +239,28 @@ One window, simple design, no toolbar clutter. States:
 Under all three states sits a status bar, two lines of the menu's font tall.
 It is chrome the window is *sized* for, not an overlay: the picture is drawn
 into what is left above it, so nothing on the bar ever covers the game. Left
-to right it carries the pad — the cross and A/B/C/START, lit by the button
-byte the machine is being handed this frame, which is also what a replay is
-playing back — then the cartridge's name off its own header, and on the right
+to right it carries the pad, then the cartridge's name off its own header,
+and on the right
 the fast-forward key and the quicksave's two keys with how old the quicksave
 is, a badge when the volume is off, and the frame rate, which gives way to a
 pause mark while the machine is stopped. Everything on it is state the shell
 already held.
+
+The pad is drawn as a cabinet's control panel: a cross, the six face buttons
+in the two rows they sit in on the real thing (X/Y/Z over A/B/C, the top row
+shifted a third of a button left because the six are an arc and not a grid),
+and MODE over START between them — every one of them lit by the button word
+the machine is being handed this frame, which is also what a replay is playing
+back. A three-button port draws its top row as empty holes rather than leaving
+it out, so the panel is the same width whichever pad is plugged in and nothing
+to its right moves when the option changes; an empty hole never lights, even
+while the key bound to it is held, because the machine is not being handed
+that bit either. Below the size where a letter fits inside a button the panel
+drops every word at once and becomes a light display, where position says
+which light is which — the same thing it says on the pad itself. Where the
+words do fit they are snapped to the built-in font's ten-pixel grid: raylib
+draws that bitmap unfiltered, and at panel size any other multiple lands
+strokes on half pixels.
 
 What each key does is said with a mark rather than a word — chevrons for
 fast-forward, a disk for the save slots, two bars for pause, a struck-through
@@ -1040,6 +1055,54 @@ too-short image, and `$A10001` reading `$20` for a domestic machine against
 and no pinned hash moved — the region fix is invisible to a game that does
 not ask.
 
+**The six-button pad** was a ceiling here until it was not. The pad is a
+three-button pad plus a counter of TH falling edges, and the counter is what a
+game reads: TH driven high and low four times over is eight reads, and the
+last three of them are the ones a three-button pad does not have.
+
+| Read | TH | Bits 5-0 |
+|---|---|---|
+| 1, 3, 5 | 1 | C B R L D U |
+| 2, 4 | 0 | S A 0 0 D U |
+| 6 | 0 | S A 0 0 0 0 — every direction low, which is the pad saying what it is |
+| 7 | 1 | C B M X Y Z — the extra four |
+| 8 | 0 | S A 1 1 1 1 |
+
+Read 9 is read 1 again: the counter cycles 1-2-3-4 rather than through zero,
+because zero is where a pad that has just been reset sits and a poll never
+starts there. What resets it is an RC network on the pad, about 1.5 ms of TH
+standing still, which is why `Pad.edge` takes the master clock: a game polling
+once a frame is 16 ms between polls and microseconds inside one, so every
+frame's poll starts from the top and a poll abandoned half way through does
+not become the front of the next one.
+
+**Three buttons stays the default, per port.** A six-button pad is not a
+superset of a three-button one: read 6 hands the game every direction at once,
+and a driver that only knows the old pad reads that as the stick being pushed
+four ways. So the pad type is a per-port option (`pad1`/`pad2` in the config,
+two rows in the options page, `--pad6` for the headless paths), and with it at
+its default no game sees a single changed bit — which is why nothing was
+re-pinned for this.
+
+The ripple the ceiling predicted was real but smaller than it looked, because
+the six flat `pad_*`/`buttons*` fields on `Genesis` collapsed into one `Pad`
+struct and a `pads: [2]Pad` on the way through: one decoder, one edge counter,
+no `2`-suffixed twin of anything. The button word widened to `u16` (the high
+byte is M X Y Z, in the bit order read 7 reports them, so the extra nibble is
+a shift and not a shuffle), which carries `input.Action`, `input.buttons` and
+the status bar's lights along with it. Save states needed no version bump: the
+`layout` hash covers a field's type changing, so an old state is refused on its
+own. Replay logs are the one thing that breaks — they widened to two
+little-endian bytes per frame and have no header to refuse an old one with, so
+a log recorded before this replays as garbage.
+
+Tested: the eight-read table above, driven through `writeData`/`read` and
+asserted as a literal array, twice over to prove the wrap; the same drive with
+`six = false`, where reads 6-8 have to be reads 1-3 again; and the timeout,
+walked to the extra half and then left alone past `pad_reset_mclk`. 133 tests
+green, VDPFIFOTesting still 111 of 122, and confirmed on a cartridge that
+reads the extra half: 600 headless frames with `--pad6` drew 816 reads of it.
+
 Ceilings:
 
 - The sweep's verdicts are coarse by design. "Still" cannot tell a hang from
@@ -1050,9 +1113,6 @@ Ceilings:
   written. Every picture this emulator can draw is somebody else's artwork,
   and a repository that refuses to carry a ROM should not carry frames of one
   either; the README says which command makes them instead.
-- No 6-button pad. It needs a second button byte per pad, which ripples
-  through `Action.padMask`, `input.buttons`, the status bar, the config file
-  and the save-state layout hash — and every game in the set plays on three.
 - No gamepad support at all: the frontend reads a keyboard and nothing else.
 - Nothing in the sweep is a regression gate, so a game that quietly gets
   worse will not turn a build red. Making it one means pinning hashes for

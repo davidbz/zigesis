@@ -21,7 +21,7 @@ of somebody else's game, so `tools/fetch_test_roms.sh` and then
 | Video | H32/H40, V28/V30, both scroll planes, window, per-line and per-column scroll, shadow/highlight, interlace, sprites with per-line limits, DMA and the FIFO, H/V interrupts, H counter | one sprite-masking edge case, sprite prefetch a line ahead (DESIGN.md §9 M4) |
 | Audio | YM2612 (diffed against Nuked-OPN2), SN76489 PSG, the analogue ladder effect, mixing and resampling to 44.1 kHz, per-channel mute | — |
 | Cartridges | raw and `.smd` copier dumps, header parsing, backup RAM to `.srm`, the `$A130F3` mapper, TMSS writes | SSF2's mapper, lock-on carts, EEPROM saves, unlicensed protection chips |
-| Machine | NTSC and PAL timing from the header or the options, both controller ports, region reported to the game from the cartridge | 6-button pad, Mega CD, 32X |
+| Machine | NTSC and PAL timing from the header or the options, both controller ports, region reported to the game from the cartridge, 3- and 6-button pads per port | Mega CD, 32X |
 | Frontend | menu, file browser, drag-and-drop, key rebinding, save states in 8 slots plus a quicksave, pause, fast-forward, frame advance, screenshots, fullscreen | shaders and scanline filters, gamepad input |
 | Determinism | headless `--shot`/`--hash`, input record and replay, pinned frame and audio hashes | — |
 
@@ -60,7 +60,8 @@ zig build run -- rom.bin --volume 50           # 0-100, default 100
 zig build run -- rom.bin --pal                 # a 50 Hz PAL machine, 313 lines
 zig build run -- rom.bin --ladder              # the YM2612's analogue ladder effect
 zig build run -- rom.bin --mute 1,2,6          # silence FM channels (6 is the DAC)
-zig build run -- rom.bin --record in.log       # save one button byte per frame
+zig build run -- rom.bin --pad6                # a 6-button pad in both ports
+zig build run -- rom.bin --record in.log       # save pad 1's buttons per frame
 zig build run -- rom.bin --replay in.log       # play that input back
 zig build run -- rom.bin --shot 900 --wav out.wav  # headless: dump the mixed audio
 zig build run -- rom.bin --shot 900 --hash     # print the pinned regression hashes
@@ -69,8 +70,8 @@ zig build run -- rom.bin --shot 900 --hash     # print the pinned regression has
 The ROM is the first positional argument and the PNG path the second; flags
 may appear in any order. The ROM is optional: started without one, zigesis
 idles on a snow screen until a file is dropped on the window or picked from
-the menu. `--volume` and `--pal` override the saved options for that run
-only.
+the menu. `--volume`, `--pal` and `--pad6` override the saved options for that
+run only.
 
 ### Controls
 
@@ -78,6 +79,7 @@ only.
 |-----|------|
 | Arrows | D-pad |
 | A / S / D | Buttons A / B / C |
+| Q / W / E | Buttons X / Y / Z (a 6-button pad only) |
 | Enter | Start |
 | Esc | Menu (and back out of it) |
 | O | Load ROM |
@@ -146,9 +148,12 @@ used. `region = auto` reads the cartridge header, so a PAL-only game gets a
 ### Deterministic replay
 
 The controller is the only nondeterminism in the machine, so `--record` writes
-one byte of button state per frame and `--replay` feeds it back. A replayed run
-is bit-identical across runs, machines, and optimization levels, which makes
-every bug a reproducible bug (DESIGN.md §6.3). `--hash` prints the framebuffer
+two bytes of button state per frame (pad 1, little-endian) and `--replay` feeds
+it back. A replayed run is bit-identical across runs, machines, and
+optimization levels, which makes every bug a reproducible bug (DESIGN.md §6.3).
+The log has no header, so a one-byte-per-frame log recorded before the
+six-button pad landed replays as garbage rather than being refused: re-record
+it. `--hash` prints the framebuffer
 and resampled-audio hashes that `test/system_test.zig` pins, so re-pinning them
 after an intentional change is a copy-paste rather than a hand edit:
 

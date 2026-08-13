@@ -51,7 +51,7 @@ fn isRom(name: []const u8) bool {
     return false;
 }
 
-fn buttonsAt(frame: u32) u8 {
+fn buttonsAt(frame: u32) u16 {
     if (frame <= press_every or frame % press_every >= press_hold) return 0;
     return if (frame / press_every % 2 == 0) genesis.btn_start else genesis.btn_c;
 }
@@ -103,7 +103,7 @@ fn run(g: *Genesis, c: *Cpu, frames: u32) Report {
     };
     var last = frameHash(g);
     while (r.frames < frames and !c.halted) : (r.frames += 1) {
-        g.buttons = buttonsAt(r.frames);
+        g.pads[0].buttons = buttonsAt(r.frames);
         scheduler.runFrame(g, c);
         // The ring is fixed-size and nothing else drains it here.
         while (g.audio.pop()) |s| r.peak = @max(r.peak, @as(i32, @intCast(@abs(@as(i32, s.l)))));
