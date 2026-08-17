@@ -18,10 +18,7 @@ pub const max_scale = 4;
 /// which is what a user wants until it guesses wrong on some import.
 pub const Region = enum { auto, ntsc, pal };
 
-/// What is plugged into a controller port. Three buttons is the default
-/// because a six-button pad is not a superset: its sixth read hands a game
-/// every direction at once, and one that only knows the three-button pad reads
-/// that as the stick being pushed four ways.
+/// What is plugged into a controller port.
 pub const PadType = enum { three, six };
 
 pub const Config = struct {
@@ -31,7 +28,7 @@ pub const Config = struct {
     scanlines: bool = false,
     audio: bool = true,
     volume: u8 = 100,
-    pads: [2]PadType = @splat(.three),
+    pads: [2]PadType = @splat(.six),
     keys: input.Bindings = input.defaults,
 
     pub fn parse(text: []const u8) Config {
