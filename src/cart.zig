@@ -184,8 +184,15 @@ pub fn info(rom: []const u8) Info {
     };
 }
 
+/// A field with any byte outside the default font's printable ASCII range
+/// reads as blank rather than as mojibake — the common case is a cart whose
+/// "overseas" title was never translated out of Shift-JIS.
 fn field(rom: []const u8, at: usize, len: usize) []const u8 {
-    return std.mem.trim(u8, rom[at..][0..len], " \x00");
+    const raw = rom[at..][0..len];
+    for (raw) |b| {
+        if (b != 0 and (b < ' ' or b > '~')) return "";
+    }
+    return std.mem.trim(u8, raw, " \x00");
 }
 
 /// Titles are laid out to fill their field — "SUPER TEST     GAME" — so
@@ -341,6 +348,14 @@ test "the header names the game, and its checksum can be checked against the ROM
     try testing.expectEqualStrings("TST1", info(&buf).title);
     // Too short to hold a header: nothing to say, rather than a crash.
     try testing.expectEqualStrings("", info(buf[0..0x100]).title);
+
+    // A cart whose "overseas" field was never translated out of Shift-JIS
+    // reads as blank, not as mojibake on a font with no glyphs for it.
+    @memcpy(buf[overseas_at..][0..2], "\x82\xf1");
+    try testing.expectEqualStrings("TST1", info(&buf).title);
+    @memset(buf[domestic_at..][0..title_len], ' ');
+    @memcpy(buf[domestic_at..][0..2], "\x82\xf1");
+    try testing.expectEqualStrings("", info(&buf).title);
 
     var squeeze: [32]u8 = undefined;
     try testing.expectEqualStrings("SUPER TEST GAME", squeezed(&squeeze, "SUPER TEST     GAME"));
