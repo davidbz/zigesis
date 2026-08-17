@@ -1087,13 +1087,14 @@ once a frame is 16 ms between polls and microseconds inside one, so every
 frame's poll starts from the top and a poll abandoned half way through does
 not become the front of the next one.
 
-**Three buttons stays the default, per port.** A six-button pad is not a
-superset of a three-button one: read 6 hands the game every direction at once,
-and a driver that only knows the old pad reads that as the stick being pushed
-four ways. So the pad type is a per-port option (`pad1`/`pad2` in the config,
-two rows in the options page, `--pad6` for the headless paths), and with it at
-its default no game sees a single changed bit — which is why nothing was
-re-pinned for this.
+**Six buttons is the default, per port.** A six-button pad is not a superset
+of a three-button one: read 6 hands the game every direction at once, and a
+driver that only knows the old pad reads that as the stick being pushed four
+ways — a real ceiling, but one only a handful of three-button-only drivers
+hit, against every game that wants X/Y/Z hitting it if the default stayed
+three. So the pad type is a per-port option (`pad1`/`pad2` in the config, two
+rows in the options page, `--pad6` for the headless paths) that a game hitting
+the ceiling can drop back from.
 
 The ripple the ceiling predicted was real but smaller than it looked, because
 the six flat `pad_*`/`buttons*` fields on `Genesis` collapsed into one `Pad`
