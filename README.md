@@ -1,85 +1,64 @@
 # zigesis
 
-A Sega Genesis / Mega Drive emulator written in Zig.
+A Sega Genesis / Mega Drive emulator, written in Zig.
 
-zigesis is built on top of [z68k](https://github.com/davidbz/z68k), a
-conformance-tested Motorola 68000 core, and adds the rest of the machine:
-the Z80 sound coprocessor, the VDP, memory map and bus arbitration, and a
-small desktop frontend. Full scope, architecture, and engineering standards
-are documented in [`DESIGN.md`](DESIGN.md); this file covers what a
-contributor or user needs to build, test, and run it.
+It emulates the whole machine: the 68000 and Z80 CPUs, the VDP (video chip),
+both sound chips, controllers, save states, and cartridge saves — plus a
+small, friendly desktop app to play games in.
 
-No screenshots are checked in: every picture this emulator can draw comes out
-of somebody else's game, so `tools/fetch_test_roms.sh` and then
-`zig build run -- roms/doukutsu-en.gen shot.png --shot 1500` makes your own.
+zigesis doesn't ship with any games. You'll need your own legally obtained
+ROM files to play anything.
 
-## Features
+## What it can do
 
-| Area | What works | Not there |
-|------|-----------|-----------|
-| CPU | 68000 via [z68k](https://github.com/davidbz/z68k) (SingleStepTests-conformant), Z80 with the full SingleStepTests corpus green, bus arbitration and BUSREQ/RESET | — |
-| Video | H32/H40, V28/V30, both scroll planes, window, per-line and per-column scroll, shadow/highlight, interlace, sprites with per-line limits, DMA and the FIFO, H/V interrupts, H counter | one sprite-masking edge case, sprite prefetch a line ahead (DESIGN.md §9 M4) |
-| Audio | YM2612 (diffed against Nuked-OPN2), SN76489 PSG, the analogue ladder effect, mixing and resampling to 44.1 kHz, per-channel mute | — |
-| Cartridges | raw and `.smd` copier dumps, header parsing, backup RAM to `.srm`, the `$A130F3` mapper, TMSS writes | SSF2's mapper, lock-on carts, EEPROM saves, unlicensed protection chips |
-| Machine | NTSC and PAL timing from the header or the options, both controller ports, region reported to the game from the cartridge, 3- and 6-button pads per port | Mega CD, 32X |
-| Frontend | menu, file browser, drag-and-drop, key rebinding, save states in 8 slots plus a quicksave, pause, fast-forward, frame advance, screenshots, fullscreen | shaders and scanline filters, gamepad input |
-| Determinism | headless `--shot`/`--hash`, input record and replay, pinned frame and audio hashes | — |
+- Plays retail Genesis/Mega Drive cartridges, NTSC and PAL, with accurate
+  video and sound.
+- Save states (8 slots + a quicksave), cartridge battery saves, and
+  configurable key bindings for two controllers (3- or 6-button).
+- Drag-and-drop or menu-based ROM loading, pause, fast-forward, frame
+  advance, screenshots, fullscreen, and a CRT-style scanline overlay.
+- Fast enough to fast-forward, and deterministic enough to record and
+  replay a run frame-for-frame.
 
-## Requirements
+A few things aren't supported: Sega CD, 32X, and some of the more exotic
+cartridge chips (like SSF2's mapper or EEPROM saves).
 
-- [Zig](https://ziglang.org/) 0.16.0 (see `build.zig.zon`).
-- To build the `zigesis` executable (not required for the library modules or
-  test suites): the system libraries [raylib](https://www.raylib.com/)
-  needs to open a window and a GL context. On Linux:
+## Getting started
 
-  ```
-  sudo apt-get install libgl1-mesa-dev libx11-dev libxrandr-dev \
-    libxinerama-dev libxcursor-dev libxi-dev libasound2-dev
-  ```
+You'll need [Zig](https://ziglang.org/) 0.16.0.
 
-  macOS and Windows runners already have what raylib needs; nothing extra
-  to install there.
-
-## Building
+On Linux you'll also need a few system libraries so [raylib](https://www.raylib.com/)
+can open a window:
 
 ```
-zig build check    # compile everything, no linking or execution (fast)
-zig build          # build the zigesis executable into zig-out/bin/
+sudo apt-get install libgl1-mesa-dev libx11-dev libxrandr-dev \
+  libxinerama-dev libxcursor-dev libxi-dev libasound2-dev
 ```
 
-## Running
+(macOS and Windows don't need anything extra.)
 
-zigesis needs a Genesis ROM image; it does not ship with one and never
-distributes one — supply your own legally obtained copy.
+Then build it:
 
 ```
-zig build run -Doptimize=ReleaseFast -- path/to/rom.bin
-zig build run -- rom.bin shot.png --shot 600   # headless: run N frames, write a PNG
-zig build run -- rom.bin --trace-z80           # Z80 instruction trace to stderr
-zig build run -- rom.bin --volume 50           # 0-100, default 100
-zig build run -- rom.bin --pal                 # a 50 Hz PAL machine, 313 lines
-zig build run -- rom.bin --ladder              # the YM2612's analogue ladder effect
-zig build run -- rom.bin --mute 1,2,6          # silence FM channels (6 is the DAC)
-zig build run -- rom.bin --pad6                # a 6-button pad in both ports
-zig build run -- rom.bin --record in.log       # save pad 1's buttons per frame
-zig build run -- rom.bin --replay in.log       # play that input back
-zig build run -- rom.bin --shot 900 --wav out.wav  # headless: dump the mixed audio
-zig build run -- rom.bin --shot 900 --hash     # print the pinned regression hashes
+zig build
 ```
 
-The ROM is the first positional argument and the PNG path the second; flags
-may appear in any order. The ROM is optional: started without one, zigesis
-idles on a snow screen until a file is dropped on the window or picked from
-the menu. `--volume`, `--pal` and `--pad6` override the saved options for that
-run only.
+And run it, pointing at your ROM:
 
-### Controls
+```
+zig build run -- path/to/rom.bin
+```
+
+Started without a ROM, zigesis idles on a snow screen until you drop one on
+the window or pick one from the menu.
+
+## Controls
 
 | Key | Does |
 |-----|------|
 | Arrows | D-pad |
 | A / S / D | Buttons A / B / C |
-| Q / W / E | Buttons X / Y / Z (a 6-button pad only) |
+| Q / W / E | Buttons X / Y / Z (6-button pad only) |
 | Enter | Start |
 | Esc | Menu (and back out of it) |
 | O | Load ROM |
@@ -92,240 +71,31 @@ run only.
 | F7 | Quickload |
 | F8 | Advance one frame (and pause) |
 | F11 | Fullscreen |
-| F12 | Screenshot, next to the ROM |
+| F12 | Screenshot |
 | Tab (held) | Fast-forward, 4x |
 
-Every one of those is rebindable from Options → Keys, including a second
-controller, which ships unbound. The menu takes the arrow keys and Enter or
-the mouse; left/right change a value in place. Save State and Load State are
-also menu entries: each lists the eight slots and the quicksave, showing
-whether a slot holds anything and how long ago it was written (`empty`,
-`just now`, `12m ago`), so nothing is overwritten or loaded blind.
+Every key is rebindable from Options → Keys, including a second controller
+(unbound by default). The menu works with arrow keys + Enter, or the mouse.
 
-With a game running, the menu's right half is the cartridge itself, laid out
-like a cabinet: the game's own name on a lit marquee, and under it the serial,
-the region it claims against the timing it is being run at, the peripherals it
-wants, its size, its backup RAM, and whether the checksum in the header
-matches the bytes that follow it — green for `OK`, red for `BAD`, which is a
-quick way to spot a bad dump.
-
-### Files beside the ROM
-
-Save states and cartridge backup RAM live next to the ROM, with an extension
-added rather than replaced: `game.bin.st0` through `.st7` for the eight
-slots, `.st8` for the quicksave, and `game.bin.srm` for a game's own saves,
-written on exit and every few seconds while it plays. F12 writes its PNG
-there too, numbered by frame (`game.bin.5400.png`), so holding the key never
-overwrites the shot before it. A save state is only
-readable by the build that wrote it — a state from another build is refused,
-not loaded as garbage — so states do not survive recompiling zigesis; `.srm`
-files do.
-
-### Options file
-
-Options are written whenever the menu changes one, to
-`$XDG_CONFIG_HOME/zigesis/config.ini` (or `~/.config/zigesis/config.ini`,
-`%APPDATA%\zigesis\config.ini`, or `zigesis.ini` beside the executable). It
-is plain `key = value` text meant to be hand-edited:
-
-```ini
-version = 1
-scale = 3
-fullscreen = false
-region = auto
-audio = true
-volume = 100
-key.up = UP
-key.a = A
-key.p2_up = NONE
-```
-
-Unknown keys are ignored and out-of-range values clamped; a file with a
-missing or unrecognised `version` is ignored entirely and the defaults are
-used. `region = auto` reads the cartridge header, so a PAL-only game gets a
-50 Hz machine without being told.
-
-### Deterministic replay
-
-The controller is the only nondeterminism in the machine, so `--record` writes
-two bytes of button state per frame (pad 1, little-endian) and `--replay` feeds
-it back. A replayed run is bit-identical across runs, machines, and
-optimization levels, which makes every bug a reproducible bug (DESIGN.md §6.3).
-The log has no header, so a one-byte-per-frame log recorded before the
-six-button pad landed replays as garbage rather than being refused: re-record
-it. `--hash` prints the framebuffer
-and resampled-audio hashes that `test/system_test.zig` pins, so re-pinning them
-after an intentional change is a copy-paste rather than a hand edit:
-
-```
-zigesis rom.gen --replay in.log --shot 900 --hash
-frame 900 fb=ad0f63028af8ca82 audio=b0f47eaf9aacf8ff samples=720927
-```
-
-## Testing
-
-```
-zig build test
-```
-
-Runs, per module: VDP, Z80, PSG, YM2612, audio mixer, `genesis` (memory map and
-bus), `scheduler` (timing and interrupts), and the frontend's `input`,
-`config`, `snow` and menu-arithmetic unit tests, plus two small Z80
-conformance-harness unit tests. It also runs the headless regression suite
-(`test/system_test.zig`), which boots
-[Cave Story MD](https://github.com/andwn/cave-story-md) — a freely
-distributable open-source homebrew — and checks the framebuffer and the
-resampled sound output against pinned hashes. Fetch the ROM once with
-`tools/fetch_test_roms.sh` (pinned to a release tag, into the gitignored
-`roms/`); the test skips cleanly when it is absent.
-
-### Compatibility sweep
-
-```
-zig build compat -Doptimize=ReleaseFast              # every ROM in roms/
-zig build compat -Doptimize=ReleaseFast -- mydir --frames 1800
-```
-
-Triage, not a gate: it boots every ROM it finds in a directory headless, runs
-each for N frames tapping Start and C, and prints one line per ROM saying
-whether the 68000 halted, whether the picture is blank, how long it has been
-still, and whether either sound chip was ever heard. Those four catch every
-way a game fails to boot, and the still and silent counts say where to point
-a `--shot` next. The list is whatever is in the directory when it runs —
-nothing is committed, fetched, or named in the source.
-
-### VDP conformance suite
-
-The same script also fetches [Nemesis' VDPFIFOTesting
-ROM](http://nemesis.hacking-cult.org/MegaDrive/Roms/Test/Mine/VDP/), the VDP
-conformance suite:
-
-```
-zig build vdpfifo -Doptimize=ReleaseFast
-```
-
-The ROM self-reports on screen, so reading it used to mean walking 22 pages by
-hand and squinting at a PNG. It draws its text one tile per character from a
-font uploaded in ASCII order, which means a name table entry *is* the
-character: `test/vdpfifo.zig` boots the ROM headless, presses Start whenever
-the picture stops changing, and prints every page as text with its score. The
-run takes about 10,000 frames and a quarter of a minute.
-
-Each page's failure count is pinned in that file, so the step is a regression
-gate and not just a printer — it exits non-zero when a page's score moves in
-either direction. It is a separate step from `zig build test` because it wants
-a release build to be quick. Where the VDP stands, and why the remaining
-failures remain, is tabulated in `DESIGN.md` section 9, M4.
-
-### YM2612 differential suite
-
-The FM core is diffed sample by sample against
-[Nuked-OPN2](https://github.com/nukeykt/Nuked-OPN2), the die-shot-accurate
-reference, over register logs covering operators, algorithms, envelopes,
-SSG-EG, the LFO, panning, the DAC, and both timers:
-
-```
-tools/fetch_ym_reference.sh   # once: commit-pinned fetch into testdata/nuked-opn2/ (gitignored)
-zig build ym-nuked            # run it, with the per-case report
-```
-
-Nuked is LGPL-2.1 and test-only, so it is never vendored. `zig build test`
-picks the suite up when the reference is present and skips it entirely when
-it is not. The measured deviations are tabulated in `DESIGN.md` section 9, M3.
-
-### Z80 conformance suite
-
-The Z80 core is validated against the full
-[SingleStepTests](https://github.com/SingleStepTests) z80 corpus
-(1,604,000 test cases), the same harness pattern z68k uses for the 68000:
-
-```
-tools/fetch_z80_tests.sh   # once: clones the corpus into testdata/z80/ (~1.6 GB, gitignored)
-zig build z80-sst          # run it
-zig build z80-sst -- 00    # only test files whose name contains "00"
-```
-
-This is a separate step from `zig build test` because the corpus is too
-large to fetch in ordinary CI runs.
-
-## Architecture
-
-Single-threaded and master-clock driven: the 53.693175 MHz NTSC master
-clock is the only time base, and every chip's rate is a named integer
-divider of it (68000 at mclk/7, Z80 at mclk/15, PSG at mclk/240, YM2612 at
-mclk/1008).
-`scheduler.zig` steps the 68000 a scanline's worth of cycles at a time and
-the Z80 an instruction at a time, running both sound chips alongside it and
-carrying each one's sub-cycle remainder so timing does not drift.
-Full detail in `DESIGN.md` section 3.3.
-
-The codebase follows a data-oriented design: every chip is a flat,
-fixed-size struct plus free functions, with no allocation in the per-frame
-path and no chip holding a pointer into another. The `Genesis` struct owns
-every chip by value and implements the bus each CPU core calls into,
-mirroring how z68k itself is structured. Full detail in `DESIGN.md`
-section 3.2.
-
-```
-src/
-  main.zig            entry point, argument parsing, the raylib frontend loop
-  genesis.zig         machine state and bus: memory map, arbitration, BUSREQ/RESET
-  scheduler.zig       master-clock accounting, per-scanline stepping, interrupts
-  vdp.zig             video display processor (315-5313)
-  psg.zig             SN76489 PSG: tone and noise channels, attenuation
-  ym2612.zig          YM2612 FM: operators, envelopes, LFO, timers, DAC
-  audio.zig           mixing, resampling, the ring buffer that feeds raylib
-  input.zig           key bindings: which host key drives which pad button or hotkey
-  config.zig          the options file: parse, write, defaults
-  ui/
-    shell.zig         menu, file browser, key rebinding (raylib primitives only)
-    snow.zig          the idle screen's noise, as pixels in an array
-  z80/
-    cpu.zig           architectural state: registers, flags, interrupt latches
-    decode.zig        opcode field decomposition, register tables
-    flags.zig         ALU operations and their flag effects
-    core.zig          fetch/decode/execute; Core(comptime Bus), same shape as z68k
-    root.zig          barrel module
-test/
-  system_test.zig     headless frame-hash and audio-hash regression suite
-  vdpfifo.zig         VDPFIFOTesting walker: reads the ROM's own report as text
-  compat.zig          compatibility sweep: boot every ROM in a directory, report
-  z80_sst_test.zig    SingleStepTests/z80 conformance runner
-tools/
-  fetch_test_roms.sh  fetches the free test ROMs (regression suite, VDP conformance) into roms/
-  fetch_z80_tests.sh  fetches the Z80 conformance corpus into testdata/
-  fetch_ym_reference.sh  fetches Nuked-OPN2, the FM reference, into testdata/
-```
-
-The Motorola 68000 core itself (`m68k`) is not in this repository — it is
-consumed as the [z68k](https://github.com/davidbz/z68k) package dependency
-and is out of scope for changes here.
+Save states and cartridge saves are written next to the ROM file
+(`game.bin.st0`, `game.bin.srm`, and so on), and screenshots land there too.
 
 ## References
 
-CPU and machine:
+zigesis is built on top of [z68k](https://github.com/davidbz/z68k), a
+conformance-tested 68000 core, and leans on some excellent community
+research:
 
-- [z68k](https://github.com/davidbz/z68k) — the 68000 core this project
-  depends on, and its own `DESIGN.md` for the prefetch model and testing
-  philosophy this project follows.
 - [Plutiedev](https://plutiedev.com) — memory map, VDP, Z80 banking, and
   I/O reference.
 - Charles MacDonald's Genesis hardware notes and `genvdp.txt` — the
   classic reference for VDP register and DMA behavior.
-- [SingleStepTests](https://github.com/SingleStepTests) — the m68000 and
-  z80 conformance suites both CPU cores are validated against.
-
-Audio:
-
 - [SMS Power](https://www.smspower.org/Development/SN76489) — the SN76489
-  reference the PSG core is written from: register format, LFSR taps, and
-  the tone-period-0 behaviour.
+  (PSG) reference.
 - [Nuked-OPN2](https://github.com/nukeykt/Nuked-OPN2) — die-shot-accurate
-  YM2612/YM3438 core, the ground truth for FM synthesis validation in M3.
+  YM2612/YM3438 core, used to validate the FM sound emulation.
 - [ymfm](https://github.com/aaronsgiles/ymfm) — a clean modern FM core
   family.
-
-See `DESIGN.md` section 11 for the complete, annotated reference list.
 
 ## License
 
