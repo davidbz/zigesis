@@ -98,7 +98,7 @@ fn parseBool(val: []const u8) ?bool {
 
 test "a written config parses back identical" {
     var cfg = Config{ .scale = 2, .fullscreen = true, .region = .pal, .scanlines = true, .audio = false, .volume = 42, .pads = .{ .six, .three } };
-    cfg.keys[@intFromEnum(input.Action.start)] = 'Q';
+    cfg.keys[@intFromEnum(input.Action.p1_start)] = 'Q';
     cfg.keys[@intFromEnum(input.Action.menu)] = 348; // unnamed: goes out as a number
 
     var buf: [4096]u8 = undefined;
@@ -115,12 +115,12 @@ test "junk and out-of-range values fall back instead of failing" {
         \\volume = not-a-number
         \\region = klingon
         \\nonsense = 3
-        \\key.up = F1
+        \\key.p1_up = F1
     );
     try std.testing.expectEqual(@as(u8, max_scale), cfg.scale);
     try std.testing.expectEqual(@as(u8, 100), cfg.volume);
     try std.testing.expectEqual(Region.auto, cfg.region);
-    try std.testing.expectEqual(input.keyCode("F1").?, cfg.keys[@intFromEnum(input.Action.up)]);
+    try std.testing.expectEqual(input.keyCode("F1").?, cfg.keys[@intFromEnum(input.Action.p1_up)]);
 }
 
 test "a foreign or unversioned file is ignored whole" {

@@ -817,20 +817,20 @@ pub fn barHeight() c_int {
 /// not have, which is drawn as an empty socket rather than left out — see
 /// `drawPad`.
 const face_buttons = [_]struct { action: Action, col: c_int, row: c_int, label: [:0]const u8 }{
-    .{ .action = .x, .col = 0, .row = 0, .label = "X" },
-    .{ .action = .y, .col = 1, .row = 0, .label = "Y" },
-    .{ .action = .z, .col = 2, .row = 0, .label = "Z" },
-    .{ .action = .a, .col = 0, .row = 1, .label = "A" },
-    .{ .action = .b, .col = 1, .row = 1, .label = "B" },
-    .{ .action = .c, .col = 2, .row = 1, .label = "C" },
+    .{ .action = .p1_x, .col = 0, .row = 0, .label = "X" },
+    .{ .action = .p1_y, .col = 1, .row = 0, .label = "Y" },
+    .{ .action = .p1_z, .col = 2, .row = 0, .label = "Z" },
+    .{ .action = .p1_a, .col = 0, .row = 1, .label = "A" },
+    .{ .action = .p1_b, .col = 1, .row = 1, .label = "B" },
+    .{ .action = .p1_c, .col = 2, .row = 1, .label = "C" },
 };
 
 /// The two in the middle of the pad, stacked as they sit on it: MODE above,
 /// START below. MODE is row 0, so a three-button pad loses it the same way it
 /// loses X/Y/Z.
 const pad_pills = [_]struct { action: Action, row: c_int, label: [:0]const u8 }{
-    .{ .action = .mode, .row = 0, .label = "MODE" },
-    .{ .action = .start, .row = 1, .label = "START" },
+    .{ .action = .p1_mode, .row = 0, .label = "MODE" },
+    .{ .action = .p1_start, .row = 1, .label = "START" },
 };
 
 /// The row a three-button pad does not have. Both tables put it first.
@@ -839,11 +839,11 @@ const six_only_row = 0;
 /// The cross, as cells of a 3x3 grid. The middle one is the hub: no button
 /// under it, and it is what makes the other four read as a d-pad.
 const dpad_cells = [_]struct { col: c_int, row: c_int, action: ?Action }{
-    .{ .col = 1, .row = 0, .action = .up },
-    .{ .col = 0, .row = 1, .action = .left },
+    .{ .col = 1, .row = 0, .action = .p1_up },
+    .{ .col = 0, .row = 1, .action = .p1_left },
     .{ .col = 1, .row = 1, .action = null },
-    .{ .col = 2, .row = 1, .action = .right },
-    .{ .col = 1, .row = 2, .action = .down },
+    .{ .col = 2, .row = 1, .action = .p1_right },
+    .{ .col = 1, .row = 2, .action = .p1_down },
 };
 
 fn held(pad: u16, action: Action) bool {
@@ -1415,8 +1415,8 @@ test "every pad button has a light on the bar, and only one" {
     const cfg = Config{};
     var buf: [quick_hint_buf]u8 = undefined;
     try std.testing.expectEqualStrings("F6/F7", quickHint(&cfg, &buf));
-    try std.testing.expect(held(input.Action.start.padMask(), .start));
-    try std.testing.expect(!held(input.Action.start.padMask(), .a));
+    try std.testing.expect(held(input.Action.p1_start.padMask(), .p1_start));
+    try std.testing.expect(!held(input.Action.p1_start.padMask(), .p1_a));
 }
 
 test "a long title scrolls a loop and starts over" {

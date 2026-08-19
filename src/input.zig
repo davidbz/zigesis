@@ -14,18 +14,18 @@ const genesis = @import("genesis");
 /// `Genesis.buttons` order, so `padMask` is a shift rather than a switch and
 /// pad n's bindings are the twelve entries at `n * pad_count`.
 pub const Action = enum {
-    up,
-    down,
-    left,
-    right,
-    b,
-    c,
-    a,
-    start,
-    z,
-    y,
-    x,
-    mode,
+    p1_up,
+    p1_down,
+    p1_left,
+    p1_right,
+    p1_b,
+    p1_c,
+    p1_a,
+    p1_start,
+    p1_z,
+    p1_y,
+    p1_x,
+    p1_mode,
     p2_up,
     p2_down,
     p2_left,
@@ -55,7 +55,7 @@ pub const Action = enum {
 
     pub const count = @typeInfo(Action).@"enum".fields.len;
     /// Buttons on one pad; actions past `pads * pad_count` are hotkeys.
-    pub const pad_count = @intFromEnum(Action.mode) + 1;
+    pub const pad_count = @intFromEnum(Action.p1_mode) + 1;
     pub const pads = 2;
 
     /// The `Genesis.buttons` bit this action holds down, or 0 for a hotkey.
@@ -66,18 +66,18 @@ pub const Action = enum {
 
     pub fn label(a: Action) [:0]const u8 {
         return switch (a) {
-            .up => "P1 Up",
-            .down => "P1 Down",
-            .left => "P1 Left",
-            .right => "P1 Right",
-            .b => "P1 Button B",
-            .c => "P1 Button C",
-            .a => "P1 Button A",
-            .start => "P1 Start",
-            .z => "P1 Button Z",
-            .y => "P1 Button Y",
-            .x => "P1 Button X",
-            .mode => "P1 Mode",
+            .p1_up => "P1 Up",
+            .p1_down => "P1 Down",
+            .p1_left => "P1 Left",
+            .p1_right => "P1 Right",
+            .p1_b => "P1 Button B",
+            .p1_c => "P1 Button C",
+            .p1_a => "P1 Button A",
+            .p1_start => "P1 Start",
+            .p1_z => "P1 Button Z",
+            .p1_y => "P1 Button Y",
+            .p1_x => "P1 Button X",
+            .p1_mode => "P1 Mode",
             .p2_up => "P2 Up",
             .p2_down => "P2 Down",
             .p2_left => "P2 Left",
@@ -117,19 +117,19 @@ pub const Bindings = [Action.count]u32;
 /// a handful of games read and no default key is worth a conflict over.
 pub const defaults: Bindings = blk: {
     var b: Bindings = @splat(0);
-    b[@intFromEnum(Action.up)] = key_up;
-    b[@intFromEnum(Action.down)] = key_down;
-    b[@intFromEnum(Action.left)] = key_left;
-    b[@intFromEnum(Action.right)] = key_right;
-    b[@intFromEnum(Action.a)] = 'A';
-    b[@intFromEnum(Action.b)] = 'S';
-    b[@intFromEnum(Action.c)] = 'D';
+    b[@intFromEnum(Action.p1_up)] = key_up;
+    b[@intFromEnum(Action.p1_down)] = key_down;
+    b[@intFromEnum(Action.p1_left)] = key_left;
+    b[@intFromEnum(Action.p1_right)] = key_right;
+    b[@intFromEnum(Action.p1_a)] = 'A';
+    b[@intFromEnum(Action.p1_b)] = 'S';
+    b[@intFromEnum(Action.p1_c)] = 'D';
     // The six-button pad's top row sits above A/B/C, so its keys do too. They
     // do nothing until a port is set to a six-button pad in the options.
-    b[@intFromEnum(Action.x)] = 'Q';
-    b[@intFromEnum(Action.y)] = 'W';
-    b[@intFromEnum(Action.z)] = 'E';
-    b[@intFromEnum(Action.start)] = key_enter;
+    b[@intFromEnum(Action.p1_x)] = 'Q';
+    b[@intFromEnum(Action.p1_y)] = 'W';
+    b[@intFromEnum(Action.p1_z)] = 'E';
+    b[@intFromEnum(Action.p1_start)] = key_enter;
     b[@intFromEnum(Action.menu)] = key_escape;
     b[@intFromEnum(Action.pause)] = 'P';
     b[@intFromEnum(Action.reset)] = key_f5;
@@ -251,14 +251,14 @@ pub fn keyCode(name: []const u8) ?u32 {
 }
 
 test "pad bits line up with the machine's button byte" {
-    try std.testing.expectEqual(genesis.btn_up, Action.up.padMask());
-    try std.testing.expectEqual(genesis.btn_a, Action.a.padMask());
-    try std.testing.expectEqual(genesis.btn_start, Action.start.padMask());
+    try std.testing.expectEqual(genesis.btn_up, Action.p1_up.padMask());
+    try std.testing.expectEqual(genesis.btn_a, Action.p1_a.padMask());
+    try std.testing.expectEqual(genesis.btn_start, Action.p1_start.padMask());
     // The six-button pad's four, in the order its extra read reports them.
-    try std.testing.expectEqual(genesis.btn_z, Action.z.padMask());
-    try std.testing.expectEqual(genesis.btn_y, Action.y.padMask());
-    try std.testing.expectEqual(genesis.btn_x, Action.x.padMask());
-    try std.testing.expectEqual(genesis.btn_mode, Action.mode.padMask());
+    try std.testing.expectEqual(genesis.btn_z, Action.p1_z.padMask());
+    try std.testing.expectEqual(genesis.btn_y, Action.p1_y.padMask());
+    try std.testing.expectEqual(genesis.btn_x, Action.p1_x.padMask());
+    try std.testing.expectEqual(genesis.btn_mode, Action.p1_mode.padMask());
     try std.testing.expectEqual(genesis.btn_mode, Action.p2_mode.padMask());
     try std.testing.expectEqual(@as(u16, 0), Action.menu.padMask());
 }
@@ -291,8 +291,8 @@ test "every key name round-trips, and fits the buffer they are written to" {
 
 test "conflicts are found in both directions" {
     var b = defaults;
-    try std.testing.expect(!conflicts(b, .up));
-    b[@intFromEnum(Action.pause)] = b[@intFromEnum(Action.a)];
+    try std.testing.expect(!conflicts(b, .p1_up));
+    b[@intFromEnum(Action.pause)] = b[@intFromEnum(Action.p1_a)];
     try std.testing.expect(conflicts(b, .pause));
-    try std.testing.expect(conflicts(b, .a));
+    try std.testing.expect(conflicts(b, .p1_a));
 }
