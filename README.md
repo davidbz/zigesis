@@ -82,9 +82,9 @@ Save states and cartridge saves are written next to the ROM file
 
 ## References
 
-zigesis is built on top of [z68k](https://github.com/davidbz/z68k), a
-conformance-tested 68000 core, and leans on some excellent community
-research:
+zigesis is built on top of [z68k](https://github.com/davidbz/z68k) and
+[z80](https://github.com/davidbz/z80), conformance-tested 68000 and Z80 cores,
+and leans on some excellent community research:
 
 - [Plutiedev](https://plutiedev.com) — memory map, VDP, Z80 banking, and
   I/O reference.

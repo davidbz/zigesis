@@ -13,16 +13,13 @@ pub fn build(b: *std.Build) void {
 
     const z68k_dep = b.dependency("z68k", .{ .target = target, .optimize = optimize });
     const m68k = z68k_dep.module("m68k");
+    const z80_dep = b.dependency("z80", .{ .target = target, .optimize = optimize });
+    const z80 = z80_dep.module("z80");
 
     // Emulation modules, in dependency order. None of these may import
     // raylib: `main.zig` is the only module that touches a display.
     const vdp = b.addModule("vdp", .{
         .root_source_file = b.path("src/vdp.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const z80 = b.addModule("z80", .{
-        .root_source_file = b.path("src/z80/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -107,10 +104,6 @@ pub fn build(b: *std.Build) void {
     const vdp_tests = b.addTest(.{ .root_module = vdp });
     test_step.dependOn(&b.addRunArtifact(vdp_tests).step);
     check_step.dependOn(&vdp_tests.step);
-
-    const z80_tests = b.addTest(.{ .root_module = z80 });
-    test_step.dependOn(&b.addRunArtifact(z80_tests).step);
-    check_step.dependOn(&z80_tests.step);
 
     const psg_tests = b.addTest(.{ .root_module = psg });
     test_step.dependOn(&b.addRunArtifact(psg_tests).step);
@@ -198,42 +191,6 @@ pub fn build(b: *std.Build) void {
         b.step("ym-nuked", "Diff the YM2612 against Nuked-OPN2, with the report")
             .dependOn(&ym_nuked_run.step);
     }
-
-    // --- Z80 SingleStepTests conformance harness ------------------------------
-    const z80_harness_mod = b.createModule(.{
-        .root_source_file = b.path("test/z80_sst_test.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "z80", .module = z80 }},
-    });
-    const z80_harness_tests = b.addTest(.{ .root_module = z80_harness_mod });
-    test_step.dependOn(&b.addRunArtifact(z80_harness_tests).step);
-    check_step.dependOn(&z80_harness_tests.step);
-
-    // The runner chews through 1.3 GiB of JSON across 1.6M cases: Debug takes
-    // ~2m40s where ReleaseFast takes ~30s, so it always builds fast no matter
-    // what -Doptimize says. Safety-checked coverage of the core still comes
-    // from the Debug unit/system tests above.
-    const z80_fast = b.createModule(.{
-        .root_source_file = b.path("src/z80/root.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
-    });
-    const z80_sst = b.addExecutable(.{
-        .name = "z80-sst",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("test/z80_sst_test.zig"),
-            .target = target,
-            .optimize = .ReleaseFast,
-            .imports = &.{.{ .name = "z80", .module = z80_fast }},
-        }),
-    });
-
-    const z80_sst_run = b.addRunArtifact(z80_sst);
-    z80_sst_run.setCwd(b.path(".")); // testdata/ is resolved relative to the project
-    if (b.args) |args| z80_sst_run.addArgs(args);
-    b.step("z80-sst", "Run the Z80 SingleStepTests conformance suite (needs testdata/z80/)")
-        .dependOn(&z80_sst_run.step);
 
     // --- VDPFIFOTesting scoreboard --------------------------------------------
     const vdpfifo = b.addExecutable(.{

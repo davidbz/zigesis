@@ -12,6 +12,12 @@ is finished and conformance-tested (all 317,500 SingleStepTests cases, exact on
 architectural state, cycle counts, and data-space bus cycles). This project
 supplies the rest of the machine and a small, polished desktop frontend.
 
+Both CPU cores are packages rather than files here. The Z80 written for M1
+moved out to [z80](https://github.com/davidbz/z80) once it was done, for the
+reason §3.1 gives about z68k: a CPU that takes its bus from the host is not
+Genesis-specific, and a core with its own conformance corpus is better off
+gating in its own CI than adding 1.6 GB to this repo's.
+
 A proof of concept already exists on the `genesis` branch of z68k
 (`examples/genesis.zig`, `examples/genesis_vdp.zig`) and boots retail
 cartridge images with per-scanline video, controller input, interrupts, and
@@ -31,8 +37,10 @@ From `examples/genesis.zig`:
   carried across scanlines so frames do not drift.
 - 3-button controller with TH-select multiplexing.
 - VBlank (level 6) and HBlank (level 4) interrupts, H/V counter.
-- Headless mode (`--shot N out.png`) that runs N frames and writes a PNG.
-  This is the seed of the regression test strategy; preserve and extend it.
+- Headless mode (`--frames N`) that runs N frames with no window and reports
+  framebuffer and audio hashes. This is the seed of the regression test
+  strategy; preserve and extend it. The PoC wrote a PNG here; that moved to
+  the F12 screenshot hotkey, which is the only thing that exports one now.
 
 From `examples/genesis_vdp.zig` (VDP 315-5313):
 
@@ -61,25 +69,19 @@ Deliberately stubbed in the PoC, i.e. the actual work of this project:
 
 ### 3.1 Repository layout
 
-New repository (working name `zigesis`) consuming z68k as a Zig package
-dependency. Do not fork the CPU into this repo.
+New repository (working name `zigesis`) consuming z68k and z80 as Zig package
+dependencies. Do not fork either CPU into this repo.
 
 ```
 zigesis/
   build.zig
-  build.zig.zon          # deps: z68k, raylib (lazy)
+  build.zig.zon          # deps: z68k, z80, raylib (lazy)
   DESIGN.md              # this file
   src/
     main.zig             # entry point, arg parsing, frontend loop
     genesis.zig          # machine state + bus (memory map, arbitration)
     scheduler.zig        # master-clock accounting, per-line stepping
     vdp.zig              # video display processor
-    z80/
-      cpu.zig            # architectural state (registers, flags, IFFs)
-      decode.zig         # opcode field decomposition, register tables
-      flags.zig          # ALU ops and their flag effects
-      core.zig           # fetch/decode/execute, Core(comptime Bus)
-      root.zig           # barrel module
     ym2612.zig           # FM synthesizer
     psg.zig              # SN76489
     audio.zig            # mixing, resampling, ring buffer to raylib
@@ -95,7 +97,6 @@ zigesis/
     system_test.zig      # headless frame-hash regression suite
   tools/
     fetch_test_roms.sh   # public-domain test ROMs only
-    fetch_z80_tests.sh   # SingleStepTests/z80 conformance corpus
     fetch_ym_reference.sh # Nuked-OPN2, the FM differential reference
 ```
 
@@ -200,7 +201,7 @@ Nice to have (only after all required items ship):
 - 6-button controller mode. Done in M8.
 - Per-channel audio muting (useful for debugging, doubles as a feature).
 - Fast-forward and frame-advance hotkeys.
-- Screenshot hotkey (already nearly free given `--shot`).
+- Screenshot hotkey (the only path that writes a PNG).
 - CRT-style scanline overlay (simple alpha stripes, not shaders).
 
 Explicitly out of scope: netplay, cheats, shader pipelines, Sega CD/32X,
@@ -424,11 +425,14 @@ Acceptance: Z80 conformance suite passes; games that hang without a live
 Z80 handshake now run; sound drivers execute (verified by trace) even
 though no audio is audible yet.
 
-`src/z80/{cpu,decode,flags,core}.zig` follow the `Core(comptime Bus)`
-generic shape (state/decode split from logic, same as `z68k`); `zig build
-z80-sst` runs the full SingleStepTests/z80 corpus and passes
-1,604,000/1,604,000 on both state and cycles (`tools/fetch_z80_tests.sh`
-fetches the corpus into the gitignored `testdata/`). `Genesis` owns the Z80
+The core follows the `Core(comptime Bus)` generic shape (state/decode split
+from logic, same as `z68k`) and passes the full SingleStepTests/z80 corpus
+1,604,000/1,604,000 on both state and cycles. It was written here and moved
+out to [z80](https://github.com/davidbz/z80) once it was done: the corpus is
+fetched and gated by that repo's CI, and this one consumes the core as a
+package pinned by tag. What follows is the Genesis side of M1, which stayed.
+
+`Genesis` owns the Z80
 `Cpu` by value and answers its bus (`z80Read8`/`z80Write8`/`z80In`/`z80Out`)
 directly; `scheduler.zig` steps it once per scanline with its own
 `zclk_debt` (mclk/15) alongside the 68k's, gated on real BUSREQ ($A11100)
@@ -689,7 +693,7 @@ The picture's size stopped being a constant. `vdp.fb` is allocated for the
 largest mode there is — 320 by 480, H40 and V30 with the double-resolution
 interlace — and `frameWidth`/`frameHeight` say how much of it the machine is
 using this frame. Everything downstream reads those: `main.zig` crops its
-`--shot` PNG to them and stretches the same rectangle over a fixed window,
+screenshot PNG to them and stretches the same rectangle over a fixed window,
 the way a TV does, and the scanline loop in `scheduler.zig` asks the VDP for
 its line count and active height per line rather than compiling them in.
 
@@ -1016,7 +1020,7 @@ every way a game fails to boot. It taps Start and C on a fixed schedule so a
 title screen and a character select do not stop the run, and hashes the
 framebuffer per frame for the still counter. Nothing is pinned and nothing
 fails: this is triage, and the gates stay `zig build test` and
-`zig build vdpfifo`. A verdict is a place to point `--shot` at, not a result
+`zig build vdpfifo`. A verdict is a place to point the window at, not a result
 — every non-`ok` line in the final sweep turned out to be a game sitting on a
 menu, a paused fight, or a fade between rounds, confirmed by screenshotting
 the frames either side of it.
@@ -1133,8 +1137,9 @@ Ceilings:
 
 ## 10. Testing Strategy Summary
 
-- CPU cores: SingleStepTests conformance (m68000 already done in z68k; z80
-  in M1). Never regress these.
+- CPU cores: SingleStepTests conformance, gated in the repo that owns each
+  core — m68000 in z68k, z80 in z80. Never regress these; a core change lands
+  there and arrives here as a tag bump.
 - Machine: deterministic headless runs with pinned frame hashes and audio
   hashes, driven by recorded input logs. Every bug fix adds a case.
 - Hardware test ROMs (public domain, fetched by script, never committed):
@@ -1150,6 +1155,8 @@ CPU and machine:
 
 - z68k and its DESIGN.md (prefetch model, testing philosophy):
   https://github.com/davidbz/z68k
+- z80, the sound CPU core, extracted from this repo after M1:
+  https://github.com/davidbz/z80
 - Genesis PoC branch: https://github.com/davidbz/z68k/tree/genesis
 - Sega Genesis Software Manual (official developer documentation).
 - Plutiedev (memory map, VDP, Z80 banking, I/O): https://plutiedev.com

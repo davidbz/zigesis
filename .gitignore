@@ -23,8 +23,8 @@ roms/
 *.state
 *.srm
 
-# SingleStepTests conformance corpora, fetched by tools/fetch_z80_tests.sh.
+# Nuked-OPN2, the FM reference, fetched by tools/fetch_ym_reference.sh.
 testdata/
 
-# Headless --shot output.
+# Screenshots (F12), written next to the ROM.
 *.png

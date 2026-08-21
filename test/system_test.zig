@@ -28,8 +28,8 @@ const max_rom_bytes = 8 << 20;
 const Checkpoint = struct { frame: u32, expected: u64 };
 
 /// `frame` is the number of frames run before hashing, so it means the same
-/// thing here as `--shot N` does on the command line and the pinned values can
-/// be regenerated with `zigesis <rom> --replay <log> --shot N --hash`.
+/// thing here as `--frames N` does on the command line and the pinned values
+/// can be regenerated with `zigesis <rom> --replay <log> --frames N --hash`.
 const checkpoints = [_]Checkpoint{
     .{ .frame = 60, .expected = 0xcccf1ad3eac1b559 }, // boot
     .{ .frame = 300, .expected = 0xde51239925ba51eb }, // intro cutscene
@@ -154,8 +154,8 @@ test "the resampled sound output is the same bytes every run" {
 ///
 /// The pinned value is page 1 passing 9 of 9. A mismatch is not a failure to
 /// debug from the hash — run
-/// `zigesis roms/VDPFIFOTesting.bin out.png --shot 120 --hash`, look at the
-/// PNG, and re-pin.
+/// `zigesis roms/VDPFIFOTesting.bin --frames 120 --hash`, press F12 in the
+/// window to see the picture, and re-pin.
 ///
 /// ponytail: page 1 only, which is tests 1-9. Walking all 18 pages needs a
 /// Start press per page and ten minutes of emulated time — minutes of it in a
