@@ -1,6 +1,6 @@
 .{
     .name = .zigesis,
-    .version = "1.0.0",
+    .version = "1.1.0",
     .fingerprint = 0xf6e1848491b017ee,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
