@@ -13,6 +13,10 @@
             .hash = "raylib-6.0.0-whq8uAYyPAW1tLAXFW3-RSAAkdqivRstBPwsCqjQEbd1",
             .lazy = true,
         },
+        .z80 = .{
+            .url = "git+https://github.com/davidbz/z80?ref=v0.0.1#965e5c5e5f9570e3d15e13c66754bad0a78620c2",
+            .hash = "z80-0.0.1-32YB2YlBAQB_Y0ZaTZFk8SywDOJGnTt-ES0He64Wjb-Q",
+        },
     },
     .paths = .{
         "build.zig",
