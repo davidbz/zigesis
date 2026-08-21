@@ -2,13 +2,13 @@
 //!
 //!     zig build run -Doptimize=ReleaseFast -- path/to/rom.bin
 //!     zig build run                                     # no ROM: the snow idles
-//!     zig build run -- rom.bin --shot 600 shot.png      # headless: N frames, then a PNG
+//!     zig build run -- rom.bin --frames 600 --hash      # headless: N frames, then hashes
 //!     zig build run -- rom.bin --trace-z80              # Z80 instruction trace to stderr
 //!     zig build run -- rom.bin --volume 50              # 0-100, overrides the config file
 //!     zig build run -- rom.bin --pal                    # a 50 Hz PAL machine
 //!     zig build run -- rom.bin --record in.log          # save one button byte per frame
-//!     zig build run -- rom.bin --shot 900 --wav out.wav    # headless: dump the mixed audio
-//!     zig build run -- rom.bin --replay in.log --shot 600 --hash
+//!     zig build run -- rom.bin --frames 900 --wav out.wav  # headless: dump the mixed audio
+//!     zig build run -- rom.bin --replay in.log --frames 600 --hash
 //!
 //! `--record`/`--replay` make a run reproducible (DESIGN.md §6.3): the only
 //! nondeterminism in the machine is the controller, so a byte per frame is the
@@ -16,7 +16,7 @@
 //! regression suite pins, so re-pinning them is a copy-paste.
 //!
 //! Owns raylib: window, texture upload, the audio stream, input polling, and
-//! the headless --shot path. Everything under `genesis`, `scheduler`, `vdp`
+//! the screenshot hotkey. Everything under `genesis`, `scheduler`, `vdp`
 //! and `audio` is plain data and functions with no knowledge of any of this.
 //!
 //! The headless path deliberately never reads the config file: a regression
@@ -365,8 +365,7 @@ pub fn main(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.skip();
     var path: ?[]const u8 = null;
-    var shot_frames: ?u32 = null;
-    var shot_path: [:0]const u8 = "shot.png";
+    var headless_frames: ?u32 = null;
     var record_path: ?[]const u8 = null;
     var replay_path: ?[]const u8 = null;
     var want_hash = false;
@@ -379,8 +378,8 @@ pub fn main(init: std.process.Init) !void {
     var pal_arg = false;
     var pad6_arg = false;
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--shot")) {
-            shot_frames = try std.fmt.parseInt(u32, args.next() orelse "60", 10);
+        if (std.mem.eql(u8, arg, "--frames")) {
+            headless_frames = try std.fmt.parseInt(u32, args.next() orelse "60", 10);
         } else if (std.mem.eql(u8, arg, "--trace-z80")) {
             opts.trace_z80 = true;
         } else if (std.mem.eql(u8, arg, "--volume")) {
@@ -403,7 +402,11 @@ pub fn main(init: std.process.Init) !void {
             mute_list = args.next() orelse return error.MissingMuteList;
         } else if (path == null) {
             path = arg;
-        } else shot_path = arg; // second positional: where --shot writes its PNG
+        } else {
+            // `<rom> out.png` used to name a headless run's PNG; dropping it
+            // in silence would read as the shot having failed.
+            std.debug.print("ignoring extra argument {s}\n", .{arg});
+        }
     }
 
     // Channels are named 1-6 the way the register map and every tracker names
@@ -432,18 +435,18 @@ pub fn main(init: std.process.Init) !void {
         };
     }
 
-    if (shot_frames) |n| {
+    if (headless_frames) |n| {
         var cfg = Config{};
         if (volume_arg) |v| cfg.volume = v;
         if (pal_arg) cfg.region = .pal;
         if (pad6_arg) cfg.pads = @splat(.six);
         const image = rom orelse {
-            std.debug.print("--shot needs a ROM\n", .{});
+            std.debug.print("--frames needs a ROM\n", .{});
             return error.NoRomGiven;
         };
         startMachine(g, &c, image, cfg, opts);
         g.audio.volume_pct = cfg.volume;
-        return headless(io, gpa, g, &c, n, shot_path, .{
+        return headless(io, gpa, g, &c, n, .{
             .replay = replay_path,
             .record = record_path,
             .wav = wav_path,
@@ -483,15 +486,14 @@ const HeadlessArgs = struct {
     hash: bool,
 };
 
-/// No window and no GL: `ExportImage` only touches pixels, so this runs on a
-/// CI box with no display.
+/// No window and no GL: nothing here touches raylib, so it runs on a CI box
+/// with no display.
 fn headless(
     io: std.Io,
     gpa: std.mem.Allocator,
     g: *Genesis,
     c: *Cpu,
     n: u32,
-    shot_path: [:0]const u8,
     args: HeadlessArgs,
 ) !void {
     const replay: ?Replay = if (args.replay) |p| .{
@@ -518,7 +520,7 @@ fn headless(
         // exactly as the windowed loop and the regression suite drain it.
         // One loop, however many consumers: draining per consumer means the
         // first one to run empties the ring and every other one gets
-        // nothing. `--shot N --hash --wav out.wav` wrote a 44-byte WAV.
+        // nothing. `--frames N --hash --wav out.wav` wrote a 44-byte WAV.
         while (g.audio.pop()) |s| {
             if (args.hash) hasher.take(s);
             if (args.wav != null) try pcm.append(gpa, s);
@@ -533,9 +535,6 @@ fn headless(
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args.record.?, .data = r.items });
         std.debug.print("recorded {d} frames of input to {s}\n", .{ r.items.len / 2, args.record.? });
     }
-    const shot = shotImage(g);
-    defer rl.UnloadImage(shot);
-    _ = rl.ExportImage(shot, shot_path.ptr);
     report(c, frames);
 }
 
@@ -595,7 +594,7 @@ fn windowed(
     rl.InitWindow(windowW(cfg.scale), windowH(cfg.scale), "zigesis");
     if (!rl.IsWindowReady()) {
         // Closing a window that never opened is a segfault, so leave first.
-        std.debug.print("no window (no display?); try --shot N out.png instead\n", .{});
+        std.debug.print("no window (no display?); try --frames N --hash instead\n", .{});
         return error.NoDisplay;
     }
     defer rl.CloseWindow();

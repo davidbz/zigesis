@@ -37,8 +37,10 @@ From `examples/genesis.zig`:
   carried across scanlines so frames do not drift.
 - 3-button controller with TH-select multiplexing.
 - VBlank (level 6) and HBlank (level 4) interrupts, H/V counter.
-- Headless mode (`--shot N out.png`) that runs N frames and writes a PNG.
-  This is the seed of the regression test strategy; preserve and extend it.
+- Headless mode (`--frames N`) that runs N frames with no window and reports
+  framebuffer and audio hashes. This is the seed of the regression test
+  strategy; preserve and extend it. The PoC wrote a PNG here; that moved to
+  the F12 screenshot hotkey, which is the only thing that exports one now.
 
 From `examples/genesis_vdp.zig` (VDP 315-5313):
 
@@ -199,7 +201,7 @@ Nice to have (only after all required items ship):
 - 6-button controller mode. Done in M8.
 - Per-channel audio muting (useful for debugging, doubles as a feature).
 - Fast-forward and frame-advance hotkeys.
-- Screenshot hotkey (already nearly free given `--shot`).
+- Screenshot hotkey (the only path that writes a PNG).
 - CRT-style scanline overlay (simple alpha stripes, not shaders).
 
 Explicitly out of scope: netplay, cheats, shader pipelines, Sega CD/32X,
@@ -691,7 +693,7 @@ The picture's size stopped being a constant. `vdp.fb` is allocated for the
 largest mode there is — 320 by 480, H40 and V30 with the double-resolution
 interlace — and `frameWidth`/`frameHeight` say how much of it the machine is
 using this frame. Everything downstream reads those: `main.zig` crops its
-`--shot` PNG to them and stretches the same rectangle over a fixed window,
+screenshot PNG to them and stretches the same rectangle over a fixed window,
 the way a TV does, and the scanline loop in `scheduler.zig` asks the VDP for
 its line count and active height per line rather than compiling them in.
 
@@ -1018,7 +1020,7 @@ every way a game fails to boot. It taps Start and C on a fixed schedule so a
 title screen and a character select do not stop the run, and hashes the
 framebuffer per frame for the still counter. Nothing is pinned and nothing
 fails: this is triage, and the gates stay `zig build test` and
-`zig build vdpfifo`. A verdict is a place to point `--shot` at, not a result
+`zig build vdpfifo`. A verdict is a place to point the window at, not a result
 — every non-`ok` line in the final sweep turned out to be a game sitting on a
 menu, a paused fight, or a fade between rounds, confirmed by screenshotting
 the frames either side of it.
